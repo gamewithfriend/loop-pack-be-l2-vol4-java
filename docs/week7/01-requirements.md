@@ -149,7 +149,7 @@ week7의 목표는 세 단계다.
 | `order-events` | orderId | 주문 결제 확정 | 판매량 집계 |
 | `coupon-issue-requests` | couponId | 쿠폰 발급 요청 | 선착순 발급 처리 |
 
-> 기존 토픽 `catalog.like-changed.v1`은 `catalog-events`로 통합하거나 병행 운영할지 **미해결 질문(8장)** 참고.
+> **결정**: 기존 토픽 `catalog.like-changed.v1`은 폐기하고, 좋아요 변경도 `catalog-events`로 **스키마 통일**해 발행한다. 모든 catalog 이벤트는 공통 envelope(`eventId`, `eventType`, `productId`, `occurredAt`, `version`, `payload`)를 공유하며, `eventType`(LIKE_CHANGED / PRODUCT_VIEWED)으로 분기한다. 기존 `LikeCountConsumer`는 신규 envelope를 읽도록 이전한다(마이그레이션은 02 문서에서 다룸).
 
 ### Step 3 — Kafka 기반 선착순 쿠폰 발급
 
@@ -204,14 +204,23 @@ week7의 목표는 세 단계다.
 
 ---
 
-## 9. 가정 & 미해결 질문 (Assumptions & Open Questions)
+## 9. 결정사항 (Decisions)
 
-1. **수집 앱 명칭** — 명세는 "commerce-collector"라 부르지만 기존 모듈은 `commerce-streamer`다. 기존 `commerce-streamer`를 확장해 집계/쿠폰 발급을 모두 담을까요? (권장) 아니면 별도 `commerce-collector` 모듈을 신설할까요?
-2. **기존 좋아요 토픽 통합** — 현재 `catalog.like-changed.v1`을 새 `catalog-events`로 흡수(이름·스키마 통일)할까요, 아니면 좋아요는 그대로 두고 신규 이벤트만 `catalog-events`로 추가할까요?
-3. **outbox 릴레이 방식** — 폴링 스케줄러(@Scheduled + ShedLock, 기존 자산 재사용) vs CDC(Debezium). 학습/운영 단순성 기준 폴링 스케줄러를 기본으로 가정해도 될까요?
-4. **멱등 저장소** — `event_handled`를 DB 테이블로 둘까요, Redis SET(TTL)로 둘까요? (이미 Redis·JPA 모듈 보유)
-5. **조회 수 집계 범위** — 상품 상세 조회마다 이벤트를 발행하면 트래픽이 큽니다. 모든 조회를 이벤트화할까요, 샘플링/배치 집계할까요? (Out of scope로 제외 가능)
-6. **선착순 동시성 메커니즘** — DB 원자적 UPDATE(`WHERE issued_count < total_quantity`)를 기본으로 가정합니다. Redis 선점 카운터까지 비교 구현(낙관/비관 락처럼 두 방식 벤치)할까요?
-7. **발급 결과 저장** — 비동기 발급 결과(접수/마감/실패)를 별도 `coupon_issue_request` 테이블에 영속할까요, 아니면 발급 성공만 `user_coupon`으로 남기고 실패는 로그/조회 불가로 둘까요?
-8. **알림/로깅의 실제 구현 수준** — 알림·행동 로깅은 mock/log까지만(경계 분리 증명)으로 가정합니다. 실제 채널 연동이 필요한가요?
-9. **DLT 도입 여부** — 처리 불가 메시지를 Dead Letter Topic으로 보낼지, 단순 에러 로그+스킵으로 둘지.
+분석 단계에서 제기된 선택지에 대해 다음과 같이 확정한다. (트레이드오프는 02 이후 설계 문서에서 구체화)
+
+| # | 항목 | 결정 | 근거 |
+| --- | --- | --- | --- |
+| 1 | 수집 앱 | 기존 **`commerce-streamer` 확장** (신규 collector 모듈 X) | Kafka·Testcontainers·배치/manual-ack 인프라 재사용. 패키지로 책임 분리(`consumer/metrics`, `consumer/coupon`, 각각 별도 consumer group) |
+| 2 | 좋아요 토픽 | **스키마 통일** — 좋아요도 `catalog-events`로 발행, 기존 `catalog.like-changed.v1` 폐기 | 공통 envelope(`eventId/eventType/productId/occurredAt/version/payload`)로 일원화, `eventType`으로 분기. 토픽·소비자 단순화 |
+| 3 | outbox 릴레이 | **폴링 스케줄러(@Scheduled + ShedLock)** | week6 `PaymentReconcileScheduler` 패턴 재사용, 다중 인스턴스 안전. Debezium은 인프라 과함 |
+| 4 | 멱등 저장소 | **DB `event_handled` 테이블** (`event_id` PK) | 영속·조회·정합 보정 용이. consumer group별 처리 표식 |
+| 5 | 선착순 동시성 | **DB 원자 UPDATE** (`UPDATE coupon SET issued_count=issued_count+1 WHERE id=? AND issued_count<total_quantity`) | couponId 파티션으로 직렬화 + 단일 원자 연산으로 초과 발급 불가. Redis 카운터 미도입 |
+| 6 | 발급 결과 저장 | **별도 `coupon_issue_request` 테이블 영속** (PENDING→ISSUED/SOLD_OUT/REJECTED) | 비동기 결과 조회의 백킹 스토어 + `(user_id,coupon_id)` unique로 멱등 겸용 |
+| 7 | 조회 수 집계 | `catalog-events`(eventType=PRODUCT_VIEWED)로 **샘플링 없이 +1** | product_metrics view_count 집계. 트래픽 우려 시 추후 샘플링/배치로 최적화 여지 |
+| 8 | 알림/로깅 구현 수준 | **mock/log까지만** (경계 분리 증명 목적) | 실제 채널 연동은 범위 외 |
+| 9 | DLT | **에러 로그 + 스킵 기본**, DLT는 추후 도입 여지 | 처리 불가 메시지로 파티션 정지 방지가 우선. 운영 성숙 시 DLT 추가 |
+
+### 남은 가정 (Assumptions)
+
+- 시스템 간 인증/토픽 ACL은 내부 네트워크 가정으로 다루지 않는다.
+- outbox 폴링 주기·배치 크기, consumer 동시성 수 등 튜닝 값은 설계/구현 단계에서 확정한다.
