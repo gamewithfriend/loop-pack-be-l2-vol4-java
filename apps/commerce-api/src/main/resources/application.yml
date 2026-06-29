@@ -39,12 +39,8 @@ spring:
             connect-timeout: 1000
             read-timeout: 2000
 
-# 좋아요 카운터 비동기 집계 토픽 (commerce-streamer가 컨슈머). key=productId 로 같은 상품은 같은 파티션.
-like-events:
-  topic: catalog.like-changed.v1
-  partitions: 3
-
 # week7 신규 토픽 파티션 수 (발행측이 KafkaAdmin으로 생성). key 단위 순서/경합범위 조절.
+# (좋아요 토픽은 옛 like-events → catalog-events 로 통합되어 event-topics.catalog 로 일원화됐다.)
 event-topics:
   catalog:
     partitions: 3

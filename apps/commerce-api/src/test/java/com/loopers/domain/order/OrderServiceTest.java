@@ -42,6 +42,7 @@ class OrderServiceTest {
     private BrandService brandService;
     private StockService stockService;
     private com.loopers.domain.coupon.UserCouponService userCouponService;
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
     private OrderService orderService;
 
     @BeforeEach
@@ -51,7 +52,8 @@ class OrderServiceTest {
         brandService = mock(BrandService.class);
         stockService = mock(StockService.class);
         userCouponService = mock(com.loopers.domain.coupon.UserCouponService.class);
-        orderService = new OrderService(orderRepository, productService, brandService, stockService, userCouponService);
+        eventPublisher = mock(org.springframework.context.ApplicationEventPublisher.class);
+        orderService = new OrderService(orderRepository, productService, brandService, stockService, userCouponService, eventPublisher);
     }
 
     private ProductModel product(Long id, long price) {
