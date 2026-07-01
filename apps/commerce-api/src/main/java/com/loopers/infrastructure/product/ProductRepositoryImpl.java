@@ -11,6 +11,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
 
+import java.time.ZonedDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -19,6 +20,7 @@ import java.util.Optional;
 @Component
 public class ProductRepositoryImpl implements ProductRepository {
     private final ProductJpaRepository productJpaRepository;
+    private final ProductMetricsJpaRepository productMetricsJpaRepository;
 
     /**
      * 순수 도메인 ↔ JPA 엔티티 경계.
@@ -27,10 +29,16 @@ public class ProductRepositoryImpl implements ProductRepository {
      *   soft delete 상태(deletedAt)도 도메인 기준으로 delete()/restore() 동기화한다(둘 다 멱등).
      *   (BaseEntity의 id가 final이라 도메인을 그대로 새 엔티티로 만들면 INSERT로 오인되므로 이 경로가 필요하다.)
      */
+    /**
+     * product 저장의 단일 관문. 여기서 product_metrics(read model)의 <b>차원 컬럼</b>도 함께 동기화한다
+     * (생성/수정/삭제/복원 + Brand→Product cascade 삭제까지 모두 이 경로를 타므로 한 곳에서 커버).
+     * 측정값 컬럼은 건드리지 않아 streamer 누적분이 보존된다.
+     */
     @Override
     public ProductModel save(ProductModel product) {
         if (product.getId() == null) {
             ProductEntity saved = productJpaRepository.save(ProductEntityMapper.toEntity(product));
+            productMetricsJpaRepository.insertDimensions(saved.getId(), saved.getBrandId(), saved.getPrice());
             return ProductEntityMapper.toDomain(saved);
         }
         ProductEntity entity = productJpaRepository.findById(product.getId())
@@ -42,7 +50,10 @@ public class ProductRepositoryImpl implements ProductRepository {
         } else {
             entity.delete();
         }
-        return ProductEntityMapper.toDomain(productJpaRepository.save(entity));
+        ProductEntity persisted = productJpaRepository.save(entity);
+        productMetricsJpaRepository.updateDimensions(
+                persisted.getId(), persisted.getPrice(), persisted.getDeletedAt(), ZonedDateTime.now());
+        return ProductEntityMapper.toDomain(persisted);
     }
 
     @Override
