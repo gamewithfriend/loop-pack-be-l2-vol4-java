@@ -29,10 +29,14 @@ demo-kafka:
   test:
     topic-name: demo.internal.topic-v1
 
-# 좋아요 카운터 비동기 집계 (commerce-api가 프로듀서). topic은 발행측과 동일해야 한다.
-like-events:
-  topic: catalog.like-changed.v1
-  reconcile-cron: "0 */10 * * * *"  # 10분마다 product_like COUNT로 likes_count 교정
+# week7 이벤트 기반 집계 (commerce-api가 프로듀서). 토픽명은 발행측 EventTopics와 동일해야 한다.
+event-topics:
+  catalog: catalog-events   # LIKE_CHANGED, PRODUCT_VIEWED (key=productId)
+  order: order-events       # ORDER_PAID (key=orderId)
+
+# product_metrics 측정값 정합성 안전망. 10분마다 진실원천으로 like_count/sales_count 교정.
+product-metrics:
+  reconcile-cron: "0 */10 * * * *"
 
 ---
 spring:
