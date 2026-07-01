@@ -2,6 +2,7 @@ package com.loopers.application.product;
 
 import com.loopers.domain.brand.BrandService;
 import com.loopers.domain.like.LikeService;
+import com.loopers.domain.product.ProductMetricsService;
 import com.loopers.domain.product.ProductModel;
 import com.loopers.domain.product.ProductService;
 import com.loopers.domain.product.ProductSortType;
@@ -17,10 +18,12 @@ import java.util.Set;
 @Component
 public class ProductFacade {
     private final ProductService productService;
+    private final ProductMetricsService productMetricsService;
     private final BrandService brandService;
     private final LikeService likeService;
     private final StockService stockService;
     private final ProductReadCache productReadCache;
+    private final ProductViewRecorder productViewRecorder;
 
     /**
      * 상품 등록 — 활성 brand 검증 + 상품 생성 + 재고 초기화를 한 트랜잭션으로 묶는다(교차-Aggregate 원자 처리).
@@ -33,12 +36,12 @@ public class ProductFacade {
         ProductModel product = productService.createProduct(brandId, name, description, imageUrl, price);
         stockService.initialize(product.getId(), stock);
         productReadCache.evictListForNewProduct();
-        return ProductInfo.of(product, stock);
+        return ProductInfo.of(product, stock, 0L); // 신규 상품 — 좋아요 0
     }
 
     public ProductInfo getProduct(Long id) {
         ProductModel product = productService.getProduct(id);
-        return ProductInfo.of(product, stockService.getQuantity(id));
+        return ProductInfo.of(product, stockService.getQuantity(id), productMetricsService.getLikeCount(id));
     }
 
     /**
@@ -46,7 +49,8 @@ public class ProductFacade {
      * 사용자별 좋아요 여부(liked)만 캐시 밖에서 실시간 조합한다. 식별된 User만 liked를 본다.
      */
     public ProductDetailInfo getProductDetail(Long id, Long userId) {
-        CachedProductDetail base = productReadCache.getDetail(id);
+        CachedProductDetail base = productReadCache.getDetail(id); // 활성 상품만 통과(없으면 NOT_FOUND)
+        productViewRecorder.record(id); // 조회수 집계 트리거(outbox → catalog-events PRODUCT_VIEWED)
         boolean liked = userId != null && likeService.isLiked(userId, id);
         return base.toInfo(liked);
     }
@@ -77,7 +81,7 @@ public class ProductFacade {
         ProductModel product = productService.updateProduct(id, name, description, imageUrl, price);
         stockService.adjust(id, stock);
         productReadCache.evictForProductChange(id);
-        return ProductInfo.of(product, stock);
+        return ProductInfo.of(product, stock, productMetricsService.getLikeCount(id));
     }
 
     /**

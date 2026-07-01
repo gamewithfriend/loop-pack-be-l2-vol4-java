@@ -1,11 +1,14 @@
 package com.loopers.infrastructure.product;
 
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.ZonedDateTime;
+import java.util.Collection;
+import java.util.List;
 
 /**
  * product_metrics 접근 리포지토리. commerce-api 는 이 테이블의 <b>차원 컬럼</b>(brand_id/price/deleted_at)과
@@ -39,4 +42,12 @@ public interface ProductMetricsJpaRepository extends JpaRepository<ProductMetric
                          @Param("price") Long price,
                          @Param("deletedAt") ZonedDateTime deletedAt,
                          @Param("now") ZonedDateTime now);
+
+    // --- 읽기(리스팅): 단일 테이블 정렬/필터/페이지. Sort 는 엔티티 프로퍼티명(likeCount/price/productId)으로 주어진다. ---
+    List<ProductMetricsEntity> findByDeletedAtIsNull(Pageable pageable);
+
+    List<ProductMetricsEntity> findByBrandIdAndDeletedAtIsNull(Long brandId, Pageable pageable);
+
+    /** 좋아요 수 batch 조회용(활성/비활성 무관 — 호출측이 이미 활성 id 만 넘긴다). */
+    List<ProductMetricsEntity> findByProductIdIn(Collection<Long> productIds);
 }

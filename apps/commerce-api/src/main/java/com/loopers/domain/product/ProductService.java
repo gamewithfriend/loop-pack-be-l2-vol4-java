@@ -4,7 +4,6 @@ import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import com.loopers.support.page.PagePolicy;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
@@ -43,13 +42,6 @@ public class ProductService {
         return productRepository.find(id).filter(ProductModel::isActive);
     }
 
-    /** 활성 상품 목록 — 브랜드 필터·정렬·페이지 (UC-03). */
-    @Transactional(readOnly = true)
-    public List<ProductModel> getProducts(Long brandId, ProductSortType sort, int page, int size) {
-        PagePolicy.validate(page, size);
-        return productRepository.findActivePage(brandId, sort, page, size);
-    }
-
     /** 특정 브랜드의 활성 상품 전체 (Brand→Product cascade 전파용 — 01 §7.5). */
     @Transactional(readOnly = true)
     public List<ProductModel> getActiveProductsByBrand(Long brandId) {
@@ -75,20 +67,5 @@ public class ProductService {
         ProductModel product = getProduct(id);
         product.delete();
         productRepository.save(product);
-    }
-
-    /**
-     * 좋아요 수 동기 +1 (01 §7.3, 04 §4.2 — 좋아요 등록과 동일 트랜잭션).
-     * 원자적 UPDATE(likes_count = likes_count + 1)로 처리해 동시 좋아요의 lost update를 차단한다.
-     */
-    @Transactional
-    public void increaseLikesCount(Long id) {
-        productRepository.incrementLikesCount(id);
-    }
-
-    /** 좋아요 수 동기 -1. 원자적 UPDATE + likes_count > 0 가드로 음수를 방지한다. */
-    @Transactional
-    public void decreaseLikesCount(Long id) {
-        productRepository.decrementLikesCount(id);
     }
 }

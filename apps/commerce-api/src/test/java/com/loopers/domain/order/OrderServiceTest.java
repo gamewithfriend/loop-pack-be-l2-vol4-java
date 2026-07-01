@@ -57,7 +57,7 @@ class OrderServiceTest {
     }
 
     private ProductModel product(Long id, long price) {
-        return ProductModel.reconstitute(id, BRAND_ID, "상품" + id, "설명", null, price, 0L, null);
+        return ProductModel.reconstitute(id, BRAND_ID, "상품" + id, "설명", null, price, null);
     }
 
     private BrandModel brand() {
