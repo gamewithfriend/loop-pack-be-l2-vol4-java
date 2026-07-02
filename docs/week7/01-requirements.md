@@ -11,7 +11,7 @@ week6까지 정의한 Loopers 커머스(상품·좋아요·주문·결제·쿠�
 
 기존 도메인 정의는 [`../week2`](../week2/01-requirements.md)~[`../week6`]를 따른다. 이 문서는 그 위에 추가·변경되는 부분(이벤트 발행/소비, 집계 테이블, 쿠폰 발급 파이프라인)만 명세한다.
 
-> **기존 자산 (week5에서 구현됨)**: 좋아요 변경은 이미 `LikeChangedEvent`(ApplicationEvent) → `@TransactionalEventListener(AFTER_COMMIT)` → Kafka 토픽 `catalog.like-changed.v1` → `commerce-streamer`의 `LikeCountConsumer`(배치+manual ack) 경로로 비동기 집계되고 있다. week7은 이 패턴을 **일반화**하고 **At Least Once + 멱등**으로 강화하며, 다른 도메인(주문/결제/조회)과 선착순 쿠폰으로 **확장**한다.
+> **기존 자산 (week5에서 구현됨)**: 좋아요 변경은 이미 `LikeChangedEvent`(ApplicationEvent) → `@TransactionalEventListener(AFTER_COMMIT)` → Kafka 토픽 `catalog.like-changed.v1` → `commerce-streamer`의 `LikeCountConsumer`(배치+manual ack) 경로로 비동기 집계되고 있었다. week7은 이 패턴을 **일반화**하고 **At Least Once + 멱등**으로 강화하며, 다른 도메인(주문/결제/조회)과 선착순 쿠폰으로 **확장**한다. **(week7 구현 결과: 발행 경로를 Transactional Outbox로 바꾸면서 outbox 적재는 `BEFORE_COMMIT` 리스너로, 실제 Kafka 발행은 커밋 후 즉시발행+릴레이로 이전했고, 토픽은 `catalog-events`로 통일해 구 토픽·`LikeCountConsumer`는 제거했다 — 아래 FR·`02` 참조.)**
 
 ---
 
@@ -91,7 +91,7 @@ week7의 목표는 세 단계다.
 - **OutboxMessage** — 발행 대기 메시지. 키 속성: `id`, `aggregate_type`(예: order, like, product), `aggregate_id`, `event_type`, `topic`, `partition_key`, `payload`(JSON), `status`(PENDING/SENT/FAILED), `created_at`, `sent_at`. 도메인 상태 변경과 같은 트랜잭션에 INSERT된다.
 - **EventHandled (멱등 레코드)** — 소비 완료 표식. 키 속성: `event_id`(PK), `consumer_group`/`handler`, `handled_at`. DB 테이블 또는 Redis SET으로 구현. 동일 `event_id` 재수신 시 스킵.
 - **ProductMetrics** — 상품 집계 카운터. 키 속성: `product_id`(PK 또는 unique), `like_count`, `sales_count`, `view_count`, `last_event_at`/`version`(최신 이벤트만 반영하기 위한 기준), `updated_at`. 상품과 1:1.
-- **CouponIssueRequest (논리적 메시지)** — 선착순 발급 요청 이벤트. 키 속성: `request_id`(멱등 키), `coupon_id`(템플릿), `user_id`, `requested_at`. Kafka `coupon-issue-requests` 토픽에 발행. 영속 엔티티가 아니라 메시지이며, 처리 결과는 기존 `user_coupon`과 발급 현황으로 남는다.
+- **CouponIssueRequest (영속 엔티티 + 메시지)** — 선착순 발급 요청. 키 속성: `request_id`(PK·멱등 키), `coupon_id`(템플릿), `user_id`, `status`(PENDING/ISSUED/SOLD_OUT/REJECTED), `requested_at`/`processed_at`, `UNIQUE(user_id, coupon_id)`. **`coupon_issue_request` 테이블로 영속**(§9 #6)되어 비동기 결과 조회의 백킹 스토어 겸 1인1매 멱등 방어선이 되며, 동시에 payload가 Kafka `coupon-issue-requests` 토픽으로 발행된다. 실제 발급분은 기존 `user_coupon`에 남는다.
 - **(변경) Coupon 템플릿** — 선착순을 위해 `total_quantity`(한정 수량), `issued_count`(발급 누계) 속성이 필요. 기존 템플릿에 확장.
 - **(신규/도출) 도메인 이벤트들** — `LikeChangedEvent`(기존), `OrderPaidEvent`(결제 확정 시 판매량 집계용), `ProductViewedEvent`(조회 수), `UserActivityLoggedEvent`(부가 로깅), `CouponIssueRequestedEvent`(발급 요청). 구체 필드는 `03-class-diagram.md`에서 확정.
 
@@ -104,17 +104,18 @@ week7의 목표는 세 단계다.
 #### FR-1.1 부가 로직 이벤트 분리 (주문/결제)
 
 - **What**: 주문 생성·결제 확정의 부가 처리(유저 행동 로깅, 알림 발송 트리거)를 동기 호출에서 `ApplicationEvent` 발행으로 분리한다.
-- **Rules**:
-  - 부가 리스너 실패가 주문/결제 트랜잭션을 롤백시키면 안 된다.
-  - 트랜잭션 *성공 후*에만 의미 있는 부가 처리(알림, 판매량 집계)는 `@TransactionalEventListener(phase = AFTER_COMMIT)`로 수신한다.
-  - 트랜잭션 *실패 시*에만 의미 있는 부가 처리(실패 로깅/보상 트리거)는 `AFTER_ROLLBACK` 또는 별도 핸들러로 수신한다.
-  - 발행은 도메인/서비스 계층에서, Kafka 전송 같은 외부 I/O는 리스너(인프라 어댑터)에서. 도메인은 Kafka를 모른다.
+- **Rules** *(구현 반영)*:
+  - **Kafka 전파용 이벤트의 outbox 적재는 도메인 변경과 원자적이어야 하므로** `@TransactionalEventListener(phase = BEFORE_COMMIT)`로 같은 트랜잭션에 적재한다. append 실패는 주요 트랜잭션과 함께 롤백돼야 정상(고아 이벤트/유실 동시 차단) — 즉 이 리스너는 격리 대상이 아니라 원자성 대상이다.
+  - 실제 Kafka 전송은 커밋된 사실만 내보내도록 **커밋 후(AFTER_COMMIT) 즉시발행 + 폴링 릴레이**가 담당한다(→ Step2). 전송 실패는 outbox PENDING 유지로 회수.
+  - 알림 등 **전파 불필요·트랜잭션 결과 무관** 부가 처리는 ApplicationEvent(AFTER_COMMIT)까지만 두는 게 원칙 — 리스너 실패는 주요 흐름에 전파하지 않는다. 단 이번 구현 범위(§9 #8)에서는 별도 알림/로깅 리스너를 두지 않았다(**미구현**, mock/log 자리만).
+  - 트랜잭션 *실패 시*에만 의미 있는 처리(실패 로깅/보상)는 `AFTER_ROLLBACK`/별도 핸들러 대상 — 현재 결제 실패 보상은 콜백/reconcile 경로(week6)가 담당.
+  - 발행은 도메인/서비스 계층에서, Kafka 전송 같은 외부 I/O는 리스너/발행기(인프라 어댑터)에서. 도메인은 Kafka를 모른다.
 - **판단 기준(산출물)**: 각 이벤트에 대해 (a) 핵심 트랜잭션과 원자적이어야 하는가? → 같은 트랜잭션 유지, (b) 결과에 영향 없는 후속인가? → 이벤트 분리, (c) 다른 시스템이 필요로 하는가? → Step 2의 Kafka 전파 대상. 이 분류표를 문서화한다.
 - **Errors**: 리스너 예외는 격리(로그)하고 주요 흐름에 전파하지 않는다. AFTER_COMMIT 리스너의 외부 호출 실패는 재시도/outbox로 회수한다.
 
 #### FR-1.2 좋아요 집계 결과적 일관성 (기존 일반화)
 
-- **What**: 좋아요 변경을 즉시 카운트 갱신이 아니라 이벤트 → 비동기 집계로 처리(기존 `catalog.like-changed.v1` 경로 유지).
+- **What**: 좋아요 변경을 즉시 카운트 갱신이 아니라 이벤트 → 비동기 집계로 처리(week7에서 `catalog-events` 토픽으로 통일, → FR-2.3).
 - **Rules**: 실제 상태 전이가 일어난 경우에만 이벤트 발행(중복 카운트 방지). 핫 로우 경합을 줄이기 위해 소비자 측 델타 코얼레싱 유지.
 
 ### Step 2 — Kafka 이벤트 파이프라인
@@ -124,7 +125,7 @@ week7의 목표는 세 단계다.
 - **What**: 시스템 간 전파가 필요한 도메인 이벤트를 outbox 테이블에 도메인 변경과 같은 트랜잭션으로 기록하고, 릴레이가 Kafka로 발행한다.
 - **Rules**:
   - 도메인 상태 변경과 `outbox` INSERT는 **단일 트랜잭션**. 둘 다 커밋되거나 둘 다 롤백.
-  - 릴레이(스케줄러/CDC 중 택1)가 `status=PENDING`을 폴링 → Kafka 전송 → `SENT` 마킹. 전송 실패는 PENDING 유지로 재시도(At Least Once).
+  - 발행은 **하이브리드**: 커밋 직후 즉시발행(저지연 주경로) + `status=PENDING` 폴링 릴레이(`@Scheduled`+ShedLock, 안전망) → Kafka 전송 → `SENT` 마킹. 전송 실패는 PENDING 유지로 재시도(At Least Once). 즉시발행/릴레이가 같은 행을 중복 발행해도 브로커·소비자 멱등이 흡수.
   - Producer 설정: `acks=all`, `enable.idempotence=true`, 적절한 `retries`.
   - 파티션 키: `catalog-events`=productId, `order-events`=orderId, `coupon-issue-requests`=couponId. 같은 키는 순서 보장.
   - 각 메시지는 전역 고유 `event_id`(예: outbox PK/UUID)를 포함 — 소비자 멱등 키.
@@ -135,9 +136,9 @@ week7의 목표는 세 단계다.
 - **What**: `catalog-events`/`order-events`를 소비해 상품별 좋아요 수/판매량/조회 수를 `product_metrics`에 upsert한다.
 - **Rules**:
   - **manual Ack**: 처리 성공 후에만 ack(commit). 처리 중 예외 시 ack하지 않아 재처리.
-  - **멱등**: `event_handled(event_id)`로 중복 차단. 이미 처리한 event_id는 스킵 후 ack.
-  - **최신 이벤트만 반영**: `version` 또는 `updated_at`(또는 이벤트 시퀀스) 기준으로, 더 오래된 이벤트가 최신 집계를 덮어쓰지 않게 한다.
-  - 좋아요는 델타 합산(±1 코얼레싱), 판매량은 결제 확정 이벤트당 수량 가산, 조회 수는 조회 이벤트당 +1.
+  - **멱등**: `event_handled(consumer_group, event_id)`로 중복 차단. 이미 처리한 event_id는 스킵 후 ack.
+  - **가산 집계 → 최신성 비교 불필요**: 좋아요/판매량/조회 세 카운터가 전부 가산(교환법칙 성립)이라 순서에 무관하게 합산하면 같은 결과가 된다. 따라서 `version` stale 판정을 두지 않고, 중복만 `event_handled`로 막는다. (envelope의 `version` 필드는 미래의 **비가산 집계** 대비로 실려 있으나 현재 값 0·소비측 미사용.)
+  - 좋아요는 델타 합산(±1, `GREATEST(0, ...)` 가드), 판매량은 결제 확정 이벤트당 수량 가산, 조회 수는 조회 이벤트당 +1.
   - reconcile(정합 보정) 배치를 안전망으로 유지(원천 데이터로 주기적 재계산).
 - **Errors**: 역직렬화 실패/처리 불가 메시지는 DLT(Dead Letter Topic) 또는 에러 로그로 격리(무한 재시도로 파티션 멈춤 방지).
 
@@ -149,7 +150,7 @@ week7의 목표는 세 단계다.
 | `order-events` | orderId | 주문 결제 확정 | 판매량 집계 |
 | `coupon-issue-requests` | couponId | 쿠폰 발급 요청 | 선착순 발급 처리 |
 
-> **결정**: 기존 토픽 `catalog.like-changed.v1`은 폐기하고, 좋아요 변경도 `catalog-events`로 **스키마 통일**해 발행한다. 모든 catalog 이벤트는 공통 envelope(`eventId`, `eventType`, `productId`, `occurredAt`, `version`, `payload`)를 공유하며, `eventType`(LIKE_CHANGED / PRODUCT_VIEWED)으로 분기한다. 기존 `LikeCountConsumer`는 신규 envelope를 읽도록 이전한다(마이그레이션은 02 문서에서 다룸).
+> **결정**: 기존 토픽 `catalog.like-changed.v1`은 폐기하고, 좋아요 변경도 `catalog-events`로 **스키마 통일**해 발행한다. 모든 catalog 이벤트는 공통 envelope(`eventId`, `eventType`, `productId`, `occurredAt`, `version`, `payload`)를 공유하며, `eventType`(LIKE_CHANGED / PRODUCT_VIEWED)으로 분기한다. 기존 `LikeCountConsumer`는 신규 envelope를 읽는 `ProductMetricsConsumer`로 대체됐다(구 토픽·구 컨슈머 제거, 마이그레이션은 02 문서 부록에서 다룸).
 
 ### Step 3 — Kafka 기반 선착순 쿠폰 발급
 
@@ -198,7 +199,7 @@ week7의 목표는 세 단계다.
 - **경계 판단 규칙**: 핵심 트랜잭션과 원자적이어야 하면 분리하지 않는다. 결과 무관 후속이면 ApplicationEvent. 타 시스템 필요 시 Kafka(outbox). 이 3분류를 모든 후보 로직에 적용해 표로 남긴다.
 - **outbox-도메인 원자성**: 도메인 변경 없는 메시지 발행 금지(고아 이벤트 방지), 메시지 없는 도메인 변경에서 전파 누락 금지 — 둘을 한 트랜잭션에 묶는다.
 - **소비자 멱등 우선**: 중복은 정상으로 간주. 모든 핸들러는 재실행 안전하게 작성.
-- **최신성 규칙**: 집계 반영은 `version`/`updated_at` 비교로 stale 이벤트가 최신 값을 덮지 않게 한다.
+- **가산 집계 규칙**: 좋아요/판매량/조회 집계는 전부 가산(교환법칙)이라 순서 비의존 — stale 판정용 `version` 비교를 두지 않고 `event_handled` 멱등만으로 정확하다. (비가산 집계가 생기면 그때 `version`/`updated_at` 최신성 비교를 도입한다.)
 - **선착순 한도 불변식**: `issued_count <= total_quantity`를 어떤 동시성 상황에서도 위반하지 않는다.
 - **reconcile 안전망**: 이벤트 유실/순서 이상에 대비해 원천(소스 오브 트루스)에서 주기적 재집계.
 
@@ -212,7 +213,7 @@ week7의 목표는 세 단계다.
 | --- | --- | --- | --- |
 | 1 | 수집 앱 | 기존 **`commerce-streamer` 확장** (신규 collector 모듈 X) | Kafka·Testcontainers·배치/manual-ack 인프라 재사용. 패키지로 책임 분리(`consumer/metrics`, `consumer/coupon`, 각각 별도 consumer group) |
 | 2 | 좋아요 토픽 | **스키마 통일** — 좋아요도 `catalog-events`로 발행, 기존 `catalog.like-changed.v1` 폐기 | 공통 envelope(`eventId/eventType/productId/occurredAt/version/payload`)로 일원화, `eventType`으로 분기. 토픽·소비자 단순화 |
-| 3 | outbox 릴레이 | **폴링 스케줄러(@Scheduled + ShedLock)** | week6 `PaymentReconcileScheduler` 패턴 재사용, 다중 인스턴스 안전. Debezium은 인프라 과함 |
+| 3 | outbox 릴레이 | **하이브리드 — 커밋후 즉시발행 + 폴링 스케줄러(@Scheduled + ShedLock) 안전망** | week6 `PaymentReconcileScheduler` 패턴 재사용, 다중 인스턴스 안전. 즉시발행으로 저지연, 릴레이로 At-Least-Once 보장. Debezium은 인프라 과함 |
 | 4 | 멱등 저장소 | **DB `event_handled` 테이블** (`event_id` PK) | 영속·조회·정합 보정 용이. consumer group별 처리 표식 |
 | 5 | 선착순 동시성 | **DB 원자 UPDATE** (`UPDATE coupon SET issued_count=issued_count+1 WHERE id=? AND issued_count<total_quantity`) | couponId 파티션으로 직렬화 + 단일 원자 연산으로 초과 발급 불가. Redis 카운터 미도입 |
 | 6 | 발급 결과 저장 | **별도 `coupon_issue_request` 테이블 영속** (PENDING→ISSUED/SOLD_OUT/REJECTED) | 비동기 결과 조회의 백킹 스토어 + `(user_id,coupon_id)` unique로 멱등 겸용 |
