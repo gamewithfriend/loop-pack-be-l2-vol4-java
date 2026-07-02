@@ -25,6 +25,12 @@ spring:
       - logging.yml
       - monitoring.yml
 
+# commerce-api와 같은 호스트에서 동시에 뜰 때 actuator 포트(monitoring.yml 기본 8081)가 겹치므로 분리.
+# Prometheus(docker/grafana/prometheus.yml)가 이 포트로 streamer를 스크레이프한다.
+management:
+  server:
+    port: 8091
+
 demo-kafka:
   test:
     topic-name: demo.internal.topic-v1
