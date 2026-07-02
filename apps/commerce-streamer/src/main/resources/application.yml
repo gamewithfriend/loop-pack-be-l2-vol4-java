@@ -37,8 +37,9 @@ demo-kafka:
 
 # week7 이벤트 기반 집계 (commerce-api가 프로듀서). 토픽명은 발행측 EventTopics와 동일해야 한다.
 event-topics:
-  catalog: catalog-events   # LIKE_CHANGED, PRODUCT_VIEWED (key=productId)
-  order: order-events       # ORDER_PAID (key=orderId)
+  catalog: catalog-events              # LIKE_CHANGED, PRODUCT_VIEWED (key=productId)
+  order: order-events                  # ORDER_PAID (key=orderId)
+  coupon-issue: coupon-issue-requests  # COUPON_ISSUE_REQUESTED (key=couponId) — Slice 4 선착순 발급
 
 # product_metrics 측정값 정합성 안전망. 10분마다 진실원천으로 like_count/sales_count 교정.
 product-metrics:
