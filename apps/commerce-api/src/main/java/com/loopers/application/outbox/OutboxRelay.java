@@ -1,8 +1,5 @@
 package com.loopers.application.outbox;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.loopers.infrastructure.outbox.EventEnvelope;
 import com.loopers.infrastructure.outbox.OutboxEntity;
 import com.loopers.infrastructure.outbox.OutboxJpaRepository;
 import com.loopers.infrastructure.outbox.OutboxStatus;
@@ -13,12 +10,10 @@ import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
@@ -30,6 +25,10 @@ import java.util.List;
  * <p>여러 인스턴스가 동시에 폴링해 같은 메시지를 중복 발행하지 않도록 {@link SchedulerLock}으로 한 인스턴스만
  * 실행한다(week6 결제 reconcile과 동일 패턴, 락 상태는 shedlock 테이블 공유). 통합 테스트(profile {@code test})에서는
  * 스케줄러를 제외하고, 테스트가 직접 {@link #relayOnce(int)}를 호출해 결정적으로 검증한다.
+ *
+ * <p>하이브리드 발행에서 릴레이는 <b>안전망(fallback)</b> 역할을 겸한다. 커밋 직후 즉시 발행
+ * ({@link OutboxImmediatePublisher})이 실패했거나 커밋~발행 사이에 앱이 죽어 PENDING으로 남은 행을
+ * 다음 폴링에서 반드시 재발행한다. 실제 전송은 공통 {@link OutboxMessagePublisher}에 위임한다.
  */
 @Slf4j
 @Component
@@ -37,11 +36,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class OutboxRelay {
 
-    private static final DateTimeFormatter ISO = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
-
     private final OutboxJpaRepository outboxJpaRepository;
-    private final KafkaTemplate<Object, Object> kafkaTemplate;
-    private final ObjectMapper objectMapper;
+    private final OutboxMessagePublisher messagePublisher;
 
     @Value("${outbox.relay.batch-size:200}")
     private int batchSize;
@@ -74,8 +70,7 @@ public class OutboxRelay {
         int sent = 0;
         for (OutboxEntity msg : pending) {
             try {
-                EventEnvelope envelope = toEnvelope(msg);
-                kafkaTemplate.send(msg.getTopic(), msg.getPartitionKey(), envelope).get();
+                messagePublisher.publish(msg);
                 msg.markSent();
                 sent++;
             } catch (InterruptedException e) {
@@ -90,24 +85,5 @@ public class OutboxRelay {
             }
         }
         return sent;
-    }
-
-    private EventEnvelope toEnvelope(OutboxEntity msg) {
-        JsonNode payload;
-        try {
-            payload = objectMapper.readTree(msg.getPayload());
-        } catch (Exception e) {
-            payload = objectMapper.createObjectNode();
-            log.error("outbox payload 파싱 실패(eventId={}): {}", msg.getId(), e.getMessage());
-        }
-        return new EventEnvelope(
-                msg.getId(),
-                msg.getEventType(),
-                msg.getAggregateType(),
-                msg.getAggregateId(),
-                msg.getVersion(),
-                msg.getCreatedAt().format(ISO),
-                payload
-        );
     }
 }

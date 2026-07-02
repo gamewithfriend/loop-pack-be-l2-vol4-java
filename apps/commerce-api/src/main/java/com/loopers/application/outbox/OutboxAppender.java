@@ -7,6 +7,7 @@ import com.loopers.infrastructure.outbox.OutboxJpaRepository;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,7 +19,9 @@ import org.springframework.transaction.annotation.Transactional;
  * ({@link Propagation#MANDATORY}로 호출자 트랜잭션을 강제). 도메인 변경과 outbox 기록이 원자적으로
  * 커밋/롤백되어야 "메시지 없는 도메인 변경"이나 "고아 이벤트"가 생기지 않는다.
  *
- * <p>실제 Kafka 전송은 {@link OutboxRelay}가 트랜잭션 밖에서 비동기로 담당한다.
+ * <p>실제 Kafka 전송은 이 트랜잭션 밖에서 이뤄진다. 하이브리드 발행: 커밋 직후
+ * {@link OutboxImmediatePublisher}가 저지연으로 즉시 발행하고, 실패분은 {@link OutboxRelay} 폴링이 재발행한다.
+ * 즉시 발행 빈은 test 프로파일/비활성화 시 존재하지 않으므로 {@link ObjectProvider}로 선택적으로 예약한다.
  */
 @Component
 @RequiredArgsConstructor
@@ -26,6 +29,7 @@ public class OutboxAppender {
 
     private final OutboxJpaRepository outboxJpaRepository;
     private final ObjectMapper objectMapper;
+    private final ObjectProvider<OutboxImmediatePublisher> immediatePublisher;
 
     /**
      * @param aggregateType 집계 루트 종류(like / product / order / coupon)
@@ -41,7 +45,10 @@ public class OutboxAppender {
                                String partitionKey, Object payload, long version) {
         String payloadJson = serialize(payload);
         OutboxEntity entity = new OutboxEntity(aggregateType, aggregateId, eventType, topic, partitionKey, payloadJson, version);
-        return outboxJpaRepository.save(entity);
+        OutboxEntity saved = outboxJpaRepository.save(entity);
+        // 커밋 직후 즉시 발행 예약(저지연). 빈이 없으면(test·비활성) no-op → 릴레이 폴링만으로 발행.
+        immediatePublisher.ifAvailable(publisher -> publisher.scheduleAfterCommit(saved.getId()));
+        return saved;
     }
 
     private String serialize(Object payload) {

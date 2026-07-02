@@ -49,8 +49,11 @@ event-topics:
   coupon-issue:
     partitions: 3
 
-# Transactional Outbox 릴레이: PENDING 메시지를 폴링해 Kafka로 발행. 다중 인스턴스는 ShedLock으로 1대만 실행.
+# Transactional Outbox: 커밋 직후 즉시 발행(저지연) + 폴링 릴레이(안전망) 하이브리드.
 outbox:
+  immediate:
+    enabled: true            # 커밋 직후 같은 스레드에서 즉시 발행. false면 순수 폴링 릴레이만 사용(저지연 포기)
+  # 릴레이: PENDING 메시지를 폴링해 Kafka로 발행(즉시 발행 실패분의 안전망). 다중 인스턴스는 ShedLock으로 1대만 실행.
   relay:
     fixed-delay: 1000          # 직전 폴링 종료 후 다음 폴링까지 대기(ms)
     initial-delay: 5000        # 부팅 직후 첫 폴링까지 대기(ms)
