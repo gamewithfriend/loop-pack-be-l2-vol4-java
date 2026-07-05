@@ -40,4 +40,5 @@
 ## 8. 테스트 현황
 
 - 단위(mock) 17개 green: `ThroughputPolicyTest`(D2 산식 4), `WaitingQueueServiceTest`(멱등진입·상태판정·발급배치 back-pressure·재큐잉·토큰검증/소모 13).
-- 통합(Testcontainers Redis) `WaitingQueueRedisIntegrationTest`: FIFO·멱등·발급배치·검증/소모·status를 실제 Redis로 검증. **Docker 기동 필요** — 현재 환경 Docker off로 미실행(코드/설정 이상 아님, week7과 동일 패턴).
+- 통합(Testcontainers Redis) `WaitingQueueRedisIntegrationTest`: FIFO·멱등·발급배치·검증/소모·status를 실제 Redis로 검증. **Docker 기동 후 전수 green 검증 완료.** 주문 E2E도 green(대기열 의존성 추가 회귀 없음).
+- 시뮬레이션 `WaitingQueueTtlSimulationTest`: TTL 스윕 부하 실험(→[`06`](./06-loadtest-ttl.md)). 결과로 **D1 토큰 TTL 60→30초 개정**.

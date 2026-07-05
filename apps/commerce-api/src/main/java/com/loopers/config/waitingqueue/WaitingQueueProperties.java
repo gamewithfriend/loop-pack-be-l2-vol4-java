@@ -21,8 +21,8 @@ public record WaitingQueueProperties(
     @DefaultValue("0.5") double avgProcessSeconds,
     /** 스케줄러 주기(초). */
     @DefaultValue("2") int schedulerIntervalSeconds,
-    /** 입장 토큰 TTL(초, D1). */
-    @DefaultValue("60") int tokenTtlSeconds,
+    /** 입장 토큰 TTL(초, D1 개정 — TTL 스윕 시뮬레이션으로 60→30 조정, docs/week8/06). */
+    @DefaultValue("30") int tokenTtlSeconds,
     /** 순번 조회 결과 캐시 TTL(초, D5). */
     @DefaultValue("2") int rankCacheSeconds
 ) {

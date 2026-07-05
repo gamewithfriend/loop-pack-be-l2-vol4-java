@@ -73,7 +73,7 @@ waiting-queue:
   reserve-ratio: 0.25         # 조회/릴레이/리컨사일 헤드룸 → maxActive = floor(40 * 0.75) = 30
   avg-process-seconds: 0.5    # 주문 1건 서버 처리 평균(초) → throughput = 30 / 0.5 = 60/s
   scheduler-interval-seconds: 2
-  token-ttl-seconds: 60       # D1
+  token-ttl-seconds: 30       # D1(개정) — TTL 스윕 시뮬레이션 결과 30s가 배수시간 최소·처리량 최고(docs/week8/06)
   rank-cache-seconds: 2       # D5
 
 # PENDING 결제 자동 정리(reconcile) 스케줄러 — 콜백 유실 안전망. 멀티 인스턴스 중복은 ShedLock으로 차단.
