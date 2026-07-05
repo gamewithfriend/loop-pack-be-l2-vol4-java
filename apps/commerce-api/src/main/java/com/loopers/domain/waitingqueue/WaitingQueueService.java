@@ -99,6 +99,20 @@ public class WaitingQueueService {
         tokens.consume(userId, token);
     }
 
+    /** 운영 현황(Admin·관측, FR-7). 부수효과 없는 읽기. */
+    public WaitingQueueStatusView status() {
+        long queueSize = queue.size();
+        long active = tokens.activeCountLive();
+        return new WaitingQueueStatusView(
+            queueSize,
+            active,
+            policy.maxActive(),
+            policy.batchSize(active),
+            policy.throughputPerSecond(),
+            policy.estimatedWaitSeconds(queueSize)
+        );
+    }
+
     private String newToken() {
         return UUID.randomUUID().toString().replace("-", "");
     }

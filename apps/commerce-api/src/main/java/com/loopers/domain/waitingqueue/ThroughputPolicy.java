@@ -50,4 +50,13 @@ public class ThroughputPolicy {
     public int tokenTtlSeconds() {
         return props.tokenTtlSeconds();
     }
+
+    /**
+     * 권장 폴링 주기(초). 대기 인원이 많을수록 넓혀 총 폴링 QPS를 억제한다(NFR-7).
+     * 1000명당 +1초, 1~10초로 클램프.
+     */
+    public int pollAfterSeconds(long aheadCount) {
+        long scaled = 1 + Math.max(0L, aheadCount) / 1000;
+        return (int) Math.min(10L, Math.max(1L, scaled));
+    }
 }

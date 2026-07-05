@@ -14,6 +14,9 @@ public interface EntryTokenRepository {
 
     long activeCount();
 
+    /** 만료 원소를 제외한 실제 활성 인원(관측용, 부수효과 없음 — score > now 카운트). */
+    long activeCountLive();
+
     /** 토큰 발급: pass/user-pass(TTL) + active:users(score=만료시각) 기록. */
     void issue(Long userId, String token, int ttlSeconds);
 

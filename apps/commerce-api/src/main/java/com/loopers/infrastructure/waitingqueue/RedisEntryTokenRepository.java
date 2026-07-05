@@ -53,6 +53,12 @@ public class RedisEntryTokenRepository implements EntryTokenRepository {
     }
 
     @Override
+    public long activeCountLive() {
+        Long count = zset.count(ACTIVE_KEY, now(), Double.POSITIVE_INFINITY);
+        return count == null ? 0L : count;
+    }
+
+    @Override
     public void issue(Long userId, String token, int ttlSeconds) {
         Duration ttl = Duration.ofSeconds(ttlSeconds);
         long expireAt = now() + ttlSeconds * 1000L;
