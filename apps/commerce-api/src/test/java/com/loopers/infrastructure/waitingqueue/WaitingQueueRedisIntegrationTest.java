@@ -12,7 +12,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
@@ -95,6 +100,39 @@ class WaitingQueueRedisIntegrationTest {
         assertThat(tokens.isActive(401L)).isFalse();
         assertThat(tokens.findUserIdByToken(token)).isNull();
         assertThat(service.resolve(401L).status()).isEqualTo(QueueStatus.NOT_IN_QUEUE);
+    }
+
+    @DisplayName("issueBatch 동시 실행: Lua 원자성으로 활성 상한(30)을 절대 초과하지 않는다")
+    @Test
+    void concurrentIssueNeverExceedsMaxActive() throws Exception {
+        // 대기열에 100명 진입(상한 30보다 많음)
+        for (long u = 1; u <= 100; u++) {
+            service.enter(u);
+        }
+
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Integer>> futures = new ArrayList<>();
+        for (int i = 0; i < threads; i++) {
+            futures.add(pool.submit(() -> {
+                start.await();          // 동시 발화
+                return service.issueBatch();
+            }));
+        }
+        start.countDown();
+
+        int totalIssued = 0;
+        for (Future<Integer> f : futures) {
+            totalIssued += f.get();
+        }
+        pool.shutdown();
+
+        // 여러 스레드가 동시에 돌아도 총 발급은 정확히 상한(30)까지만 — 초과 발급 없음
+        assertThat(totalIssued).isEqualTo(30);
+        assertThat(tokens.activeCountLive()).isEqualTo(30L);
+        // 나머지 70명은 대기열에 그대로
+        assertThat(service.status().queueSize()).isEqualTo(70L);
     }
 
     @DisplayName("status: 대기 인원·활성 인원·파생값을 반영한다")

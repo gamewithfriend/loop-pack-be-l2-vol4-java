@@ -10,13 +10,15 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import org.mockito.ArgumentCaptor;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -30,16 +32,18 @@ class WaitingQueueServiceTest {
 
     private WaitingQueueRepository queue;
     private EntryTokenRepository tokens;
+    private TokenIssuer issuer;
     private WaitingQueueService service;
 
     @BeforeEach
     void setUp() {
         queue = mock(WaitingQueueRepository.class);
         tokens = mock(EntryTokenRepository.class);
-        // maxActive=30, throughput=60/s
+        issuer = mock(TokenIssuer.class);
+        // maxActive=30, throughput=60/s, tokenTtl=60
         ThroughputPolicy policy = new ThroughputPolicy(
             new WaitingQueueProperties(true, 40, 0.25, 0.5, 2, 60, 2));
-        service = new WaitingQueueService(queue, tokens, policy);
+        service = new WaitingQueueService(queue, tokens, policy, issuer);
     }
 
     @Nested
@@ -105,45 +109,31 @@ class WaitingQueueServiceTest {
     }
 
     @Nested
-    @DisplayName("issueBatch — 발급 배치(back-pressure)")
+    @DisplayName("issueBatch — 원자 발급 위임")
     class IssueBatch {
         @Test
-        @DisplayName("활성 여유분(batchSize)만큼만 pop해 발급한다")
-        void respectsBatchSize() {
-            when(tokens.purgeExpiredAndCount()).thenReturn(25L); // 활성 25 → 여유 5
-            when(queue.popFront(5)).thenReturn(List.of(1L, 2L, 3L, 4L, 5L));
+        @DisplayName("maxActive개의 후보 토큰을 만들어 TokenIssuer에 원자 발급을 위임한다")
+        @SuppressWarnings("unchecked")
+        void delegatesToIssuer() {
+            when(issuer.issueFront(eq(30), eq(60), anyList()))
+                .thenReturn(List.of(1L, 2L, 3L)); // 3명 발급됨
 
             int issued = service.issueBatch();
 
-            assertThat(issued).isEqualTo(5);
-            verify(queue).popFront(5);
-            verify(tokens, times(5)).issue(org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.anyString(), eq(60));
+            assertThat(issued).isEqualTo(3);
+            ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
+            verify(issuer).issueFront(eq(30), eq(60), captor.capture());
+            // 후보 토큰 = 여유분 최대치(maxActive), 중복·null 없음
+            assertThat(captor.getValue()).hasSize(30).doesNotContainNull();
+            assertThat(captor.getValue()).doesNotHaveDuplicates();
         }
 
         @Test
-        @DisplayName("활성이 상한(30)이면 발급 0, pop 하지 않음")
-        void skipWhenFull() {
-            when(tokens.purgeExpiredAndCount()).thenReturn(30L);
+        @DisplayName("발급 0이면 0을 반환한다(활성 상한 도달)")
+        void none() {
+            when(issuer.issueFront(anyInt(), anyInt(), anyList())).thenReturn(List.of());
 
-            int issued = service.issueBatch();
-
-            assertThat(issued).isEqualTo(0);
-            verify(queue, never()).popFront(anyInt());
-        }
-
-        @Test
-        @DisplayName("발급 실패한 유저는 큐 뒤로 재큐잉(유실 방지)")
-        void requeueOnFailure() {
-            when(tokens.purgeExpiredAndCount()).thenReturn(0L);
-            when(queue.popFront(30)).thenReturn(List.of(7L, 8L));
-            org.mockito.Mockito.doThrow(new RuntimeException("redis down"))
-                .when(tokens).issue(eq(7L), org.mockito.ArgumentMatchers.anyString(), eq(60));
-
-            int issued = service.issueBatch();
-
-            assertThat(issued).isEqualTo(1); // 8L만 성공
-            verify(queue).requeue(7L);
+            assertThat(service.issueBatch()).isEqualTo(0);
         }
     }
 

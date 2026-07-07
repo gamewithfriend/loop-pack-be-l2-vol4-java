@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -23,6 +24,7 @@ public class WaitingQueueService {
     private final WaitingQueueRepository queue;
     private final EntryTokenRepository tokens;
     private final ThroughputPolicy policy;
+    private final TokenIssuer issuer;
 
     /** 대기열 진입(FR-1). 이미 활성이면 READY, 이미/신규 대기면 WAITING(순번 유지, 멱등). */
     public QueueSnapshot enter(Long userId) {
@@ -53,28 +55,20 @@ public class WaitingQueueService {
     }
 
     /**
-     * 토큰 발급 배치(FR-3, 스케줄러가 호출). 만료 청소 후 활성 여유분(=batchSize)만큼 앞에서 pop해 발급.
-     * 발급 실패한 유저는 큐 뒤로 되돌려 유실을 방지한다(공정성). 발급 인원 수를 반환한다.
+     * 토큰 발급 배치(FR-3, 스케줄러가 호출). 만료 청소 → 활성 여유분(maxActive - 활성)만큼 앞에서 pop → 발급을
+     * {@link TokenIssuer}가 단일 Lua 스크립트로 <b>원자 실행</b>한다. count-then-issue가 원자라 다중 인스턴스
+     * 동시 실행에도 활성 상한 초과가 없어 분산 락이 필요 없다. 발급 인원 수를 반환한다.
+     *
+     * <p>후보 토큰은 여유분 최대치(=maxActive)만큼 미리 만들어 넘기고, 실제 발급분만 스크립트가 소비한다.
      */
     public int issueBatch() {
-        long active = tokens.purgeExpiredAndCount();
-        int k = policy.batchSize(active);
-        if (k <= 0) {
-            return 0;
+        int maxActive = policy.maxActive();
+        List<String> candidates = new ArrayList<>(maxActive);
+        for (int i = 0; i < maxActive; i++) {
+            candidates.add(newToken());
         }
-        List<Long> userIds = queue.popFront(k);
-        int issued = 0;
-        for (Long userId : userIds) {
-            String token = newToken();
-            try {
-                tokens.issue(userId, token, policy.tokenTtlSeconds());
-                issued++;
-            } catch (RuntimeException e) {
-                log.warn("입장 토큰 발급 실패 → 재큐잉 userId={}", userId, e);
-                queue.requeue(userId);
-            }
-        }
-        return issued;
+        List<Long> issued = issuer.issueFront(maxActive, policy.tokenTtlSeconds(), candidates);
+        return issued.size();
     }
 
     /**

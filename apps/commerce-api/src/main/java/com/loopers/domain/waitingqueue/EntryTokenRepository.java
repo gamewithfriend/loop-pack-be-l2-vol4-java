@@ -9,16 +9,8 @@ public interface EntryTokenRepository {
     /** 현재 활성(유효 토큰 보유)인가. active:users score > now 판정. */
     boolean isActive(Long userId);
 
-    /** 만료 원소(score <= now)를 제거하고 남은 활성 인원을 반환(스케줄러 back-pressure 계산용). */
-    long purgeExpiredAndCount();
-
-    long activeCount();
-
     /** 만료 원소를 제외한 실제 활성 인원(관측용, 부수효과 없음 — score > now 카운트). */
     long activeCountLive();
-
-    /** 토큰 발급: pass/user-pass(TTL) + active:users(score=만료시각) 기록. */
-    void issue(Long userId, String token, int ttlSeconds);
 
     /** 토큰 → userId. 없거나 만료면 null. */
     Long findUserIdByToken(String token);

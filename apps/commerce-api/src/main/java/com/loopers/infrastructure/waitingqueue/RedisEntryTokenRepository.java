@@ -8,7 +8,6 @@ import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Repository;
 
-import java.time.Duration;
 import java.util.List;
 
 /**
@@ -41,30 +40,9 @@ public class RedisEntryTokenRepository implements EntryTokenRepository {
     }
 
     @Override
-    public long purgeExpiredAndCount() {
-        zset.removeRangeByScore(ACTIVE_KEY, 0, now());
-        return activeCount();
-    }
-
-    @Override
-    public long activeCount() {
-        Long count = zset.zCard(ACTIVE_KEY);
-        return count == null ? 0L : count;
-    }
-
-    @Override
     public long activeCountLive() {
         Long count = zset.count(ACTIVE_KEY, now(), Double.POSITIVE_INFINITY);
         return count == null ? 0L : count;
-    }
-
-    @Override
-    public void issue(Long userId, String token, int ttlSeconds) {
-        Duration ttl = Duration.ofSeconds(ttlSeconds);
-        long expireAt = now() + ttlSeconds * 1000L;
-        value.set(passKey(token), userId.toString(), ttl);
-        value.set(userPassKey(userId), token, ttl);
-        zset.add(ACTIVE_KEY, userId.toString(), (double) expireAt);
     }
 
     @Override

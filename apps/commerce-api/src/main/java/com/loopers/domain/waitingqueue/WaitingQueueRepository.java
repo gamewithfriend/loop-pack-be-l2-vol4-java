@@ -1,7 +1,5 @@
 package com.loopers.domain.waitingqueue;
 
-import java.util.List;
-
 /**
  * 대기 순서 저장소(포트). 구현은 Redis Sorted Set(waiting:queue) — docs/week8/04-redis-model.md §2.1.
  */
@@ -17,10 +15,4 @@ public interface WaitingQueueRepository {
 
     /** 총 대기 인원. */
     long size();
-
-    /** 앞에서 k명 pop(FIFO). 발급 배치용(Step 2). */
-    List<Long> popFront(int k);
-
-    /** 발급 실패 등으로 대기열 뒤로 되돌림(새 순서 부여). */
-    void requeue(Long userId);
 }
