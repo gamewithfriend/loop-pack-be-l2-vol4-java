@@ -102,10 +102,10 @@ class WaitingQueueRedisIntegrationTest {
         assertThat(service.resolve(401L).status()).isEqualTo(QueueStatus.NOT_IN_QUEUE);
     }
 
-    @DisplayName("issueBatch 동시 실행: Lua 원자성으로 활성 상한(30)을 절대 초과하지 않는다")
+    @DisplayName("issueBatch 동시 실행: Lua 윈도우 레이트리밋으로 한 주기 방류가 N(30)을 절대 초과하지 않는다")
     @Test
-    void concurrentIssueNeverExceedsMaxActive() throws Exception {
-        // 대기열에 100명 진입(상한 30보다 많음)
+    void concurrentIssueNeverExceedsReleaseSize() throws Exception {
+        // 대기열에 100명 진입(방류 N=30보다 많음)
         for (long u = 1; u <= 100; u++) {
             service.enter(u);
         }
@@ -128,7 +128,7 @@ class WaitingQueueRedisIntegrationTest {
         }
         pool.shutdown();
 
-        // 여러 스레드가 동시에 돌아도 총 발급은 정확히 상한(30)까지만 — 초과 발급 없음
+        // 여러 스레드가 같은 윈도우에 동시에 쏴도 총 방류는 정확히 N(30)까지만 — 초과 방류 없음
         assertThat(totalIssued).isEqualTo(30);
         assertThat(tokens.activeCountLive()).isEqualTo(30L);
         // 나머지 70명은 대기열에 그대로
@@ -139,13 +139,14 @@ class WaitingQueueRedisIntegrationTest {
     @Test
     void status() {
         List.of(501L, 502L, 503L, 504L).forEach(service::enter);
-        service.issueBatch(); // 4명 활성화(활성 상한 30 미만)
+        service.issueBatch(); // 4명 방류(방류 N=30 미만)
 
         var status = service.status();
 
-        assertThat(status.queueSize()).isEqualTo(0L);   // 전원 발급되어 큐 비움
+        assertThat(status.queueSize()).isEqualTo(0L);   // 전원 방류되어 큐 비움
         assertThat(status.activeCount()).isEqualTo(4L);
-        assertThat(status.maxActive()).isEqualTo(30);
-        assertThat(status.throughputPerSecond()).isEqualTo(60.0);
+        assertThat(status.releaseSize()).isEqualTo(30);
+        assertThat(status.releaseIntervalSeconds()).isEqualTo(2);
+        assertThat(status.throughputPerSecond()).isEqualTo(15.0);
     }
 }

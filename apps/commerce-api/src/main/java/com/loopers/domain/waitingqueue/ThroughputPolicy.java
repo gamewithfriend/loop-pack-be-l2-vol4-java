@@ -4,14 +4,17 @@ import com.loopers.config.waitingqueue.WaitingQueueProperties;
 import org.springframework.stereotype.Component;
 
 /**
- * 처리량·배치·ETA 산정(docs/week8 §NFR-4·D2 코드화).
+ * 방류형(rate-based) 처리량·ETA 산정(docs/week8 §NFR-4·D2 코드화).
  *
  * <pre>
- * maxActive          = floor(dbPoolSize * (1 - reserveRatio))   // 동시 처리 상한(back-pressure)
- * throughputPerSecond= maxActive / avgProcessSeconds            // 주문/초
- * batchSize(active)  = max(0, maxActive - active)               // 활성까지만 리필(P-5)
- * estimatedWaitSec(ahead) = ceil(ahead / throughputPerSecond)   // 예상 대기 시간
+ * releaseSize (N)          = 한 주기 방류 인원(고정)
+ * interval    (M)          = 방류 주기(초)
+ * throughputPerSecond      = N / M                              // 초당 방류(입장) 인원
+ * estimatedWaitSec(ahead)  = ceil(ahead / throughputPerSecond)  // 내 앞 인원이 빠지는 데 걸리는 시간
  * </pre>
+ *
+ * <p>정원제(활성 상한까지 리필)와 달리 방류량은 활성 점유량과 무관한 고정 레이트다.
+ * 활성 상한 개념이 없으므로 다중 인스턴스 방류 총합은 {@link TokenIssuer}가 Redis 윈도우 레이트리밋으로 N/주기에 고정한다.
  */
 @Component
 public class ThroughputPolicy {
@@ -22,21 +25,22 @@ public class ThroughputPolicy {
         this.props = props;
     }
 
-    public int maxActive() {
-        return (int) Math.floor(props.dbPoolSize() * (1.0 - props.reserveRatio()));
+    /** N: 한 주기에 방류할 인원. */
+    public int releaseSize() {
+        return props.releaseSize();
+    }
+
+    /** M: 방류 주기(초). */
+    public int releaseIntervalSeconds() {
+        return props.schedulerIntervalSeconds();
     }
 
     public double throughputPerSecond() {
-        double avg = props.avgProcessSeconds();
-        if (avg <= 0) {
-            return maxActive();
+        int m = props.schedulerIntervalSeconds();
+        if (m <= 0) {
+            return props.releaseSize();
         }
-        return maxActive() / avg;
-    }
-
-    /** 이번 주기에 발급할 인원 = 활성 상한까지의 여유분. 활성이 꽉 차면 0. */
-    public int batchSize(long activeCount) {
-        return (int) Math.max(0L, maxActive() - activeCount);
+        return (double) props.releaseSize() / m;
     }
 
     public long estimatedWaitSeconds(long aheadCount) {

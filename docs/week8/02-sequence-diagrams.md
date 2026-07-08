@@ -1,5 +1,7 @@
 # 02. 시퀀스 다이어그램 — Redis 기반 대기열 (Virtual Waiting Room)
 
+> **⚠️ 2026-07-08 방류형 전환**: 발급(S2-1) 흐름의 `k = min(N_max, maxActive − activeCount)`(정원제 리필)·`ShedLock 단일 실행`은 폐기됐다. 현행은 **방류형 + Lua 윈도우 레이트리밋** — 매 M초 대기열 앞에서 최대 N명 방류, 방류량 = `N − 이번 윈도우 방류누계`(다중 인스턴스 합산 ≤ N), 락 없음. 정설은 [`04-redis-model.md`](./04-redis-model.md) §3.1. 아래 다이어그램의 해당 노트는 구설계다.
+
 [`01-requirements.md`](./01-requirements.md) §6의 Step1~3 흐름을 레이어별 참여자 기준으로 시각화한다. 표기 규칙은 [`../week2/02-sequence-diagrams.md`](../week2/02-sequence-diagrams.md) §0을 따른다(레이어/화살표/생략/공통 에러). 이 문서의 결정 근거는 [`01-requirements.md`](./01-requirements.md) §9 결정사항 표(D1~D9)를 따른다.
 
 ## 0. 참여자
@@ -125,7 +127,7 @@ sequenceDiagram
 
 ### S2-1. 토큰 발급 배치 (FR-3, 스케줄러)
 
-ShedLock으로 다중 인스턴스 단일 실행(NFR-5). 활성 상한까지만 리필(P-5, D2).
+[방류형] Lua 윈도우 레이트리밋으로 M초당 방류 ≤ N 보장(다중 인스턴스 안전, 락 없음). 활성 상한 gate 없음.
 
 ```mermaid
 sequenceDiagram
@@ -142,7 +144,7 @@ sequenceDiagram
     Note over WQS,ACT: 1) 만료분 청소 → 정확한 활성 카운트(D6)
     WQS->>ACT: ZREMRANGEBYSCORE active:users 0 now
     WQS->>ACT: ZCARD active:users  → activeCount
-    WQS->>WQS: k = min(N_max=30, maxActive=30 − activeCount)
+    WQS->>WQS: [방류형] k = N(=30) − 이번 M초 윈도우 방류누계 (Lua 원자)
     alt k <= 0 (활성 꽉 참)
         WQS-->>Sched: issued=0 (스킵, P-5)
     else k 명 입장

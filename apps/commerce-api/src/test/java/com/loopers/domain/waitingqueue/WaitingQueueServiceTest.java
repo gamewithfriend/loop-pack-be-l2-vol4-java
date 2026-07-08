@@ -40,9 +40,9 @@ class WaitingQueueServiceTest {
         queue = mock(WaitingQueueRepository.class);
         tokens = mock(EntryTokenRepository.class);
         issuer = mock(TokenIssuer.class);
-        // maxActive=30, throughput=60/s, tokenTtl=60
+        // releaseSize(N)=30, interval(M)=2, throughput=15/s, tokenTtl=30
         ThroughputPolicy policy = new ThroughputPolicy(
-            new WaitingQueueProperties(true, 40, 0.25, 0.5, 2, 60, 2));
+            new WaitingQueueProperties(true, 30, 2, 30, 2));
         service = new WaitingQueueService(queue, tokens, policy, issuer);
     }
 
@@ -72,7 +72,7 @@ class WaitingQueueServiceTest {
             assertThat(snapshot.status()).isEqualTo(QueueStatus.WAITING);
             assertThat(snapshot.rank()).isEqualTo(60L);        // 1-based
             assertThat(snapshot.aheadCount()).isEqualTo(59L);
-            assertThat(snapshot.estimatedWaitSeconds()).isEqualTo(1L); // ceil(59/60)
+            assertThat(snapshot.estimatedWaitSeconds()).isEqualTo(4L); // ceil(59/15)
         }
 
         @Test
@@ -109,29 +109,30 @@ class WaitingQueueServiceTest {
     }
 
     @Nested
-    @DisplayName("issueBatch — 원자 발급 위임")
+    @DisplayName("issueBatch — 방류 원자 위임")
     class IssueBatch {
         @Test
-        @DisplayName("maxActive개의 후보 토큰을 만들어 TokenIssuer에 원자 발급을 위임한다")
+        @DisplayName("N(=releaseSize)개의 후보 토큰을 만들어 TokenIssuer에 원자 방류를 위임한다")
         @SuppressWarnings("unchecked")
         void delegatesToIssuer() {
-            when(issuer.issueFront(eq(30), eq(60), anyList()))
-                .thenReturn(List.of(1L, 2L, 3L)); // 3명 발급됨
+            // issueFront(releaseSize=30, interval=2, ttl=30, tokens)
+            when(issuer.issueFront(eq(30), eq(2), eq(30), anyList()))
+                .thenReturn(List.of(1L, 2L, 3L)); // 3명 방류됨
 
             int issued = service.issueBatch();
 
             assertThat(issued).isEqualTo(3);
             ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
-            verify(issuer).issueFront(eq(30), eq(60), captor.capture());
-            // 후보 토큰 = 여유분 최대치(maxActive), 중복·null 없음
+            verify(issuer).issueFront(eq(30), eq(2), eq(30), captor.capture());
+            // 후보 토큰 = 방류 최대치(N), 중복·null 없음
             assertThat(captor.getValue()).hasSize(30).doesNotContainNull();
             assertThat(captor.getValue()).doesNotHaveDuplicates();
         }
 
         @Test
-        @DisplayName("발급 0이면 0을 반환한다(활성 상한 도달)")
+        @DisplayName("방류 0이면 0을 반환한다(대기열 비었거나 이번 윈도우 소진)")
         void none() {
-            when(issuer.issueFront(anyInt(), anyInt(), anyList())).thenReturn(List.of());
+            when(issuer.issueFront(anyInt(), anyInt(), anyInt(), anyList())).thenReturn(List.of());
 
             assertThat(service.issueBatch()).isEqualTo(0);
         }

@@ -7,8 +7,8 @@ public class AdminWaitingQueueV1Dto {
     public record StatusResponse(
         long queueSize,
         long activeCount,
-        int maxActive,
-        int nextBatchSize,
+        int releaseSize,
+        int releaseIntervalSeconds,
         double throughputPerSecond,
         long estimatedTailWaitSeconds
     ) {
@@ -16,8 +16,8 @@ public class AdminWaitingQueueV1Dto {
             return new StatusResponse(
                 view.queueSize(),
                 view.activeCount(),
-                view.maxActive(),
-                view.nextBatchSize(),
+                view.releaseSize(),
+                view.releaseIntervalSeconds(),
                 view.throughputPerSecond(),
                 view.estimatedTailWaitSeconds()
             );

@@ -1,5 +1,11 @@
 # 04. Redis 데이터 모델 — 대기열 (Virtual Waiting Room)
 
+> **⚠️ 설계 변경 (2026-07-08): 정원제 → 방류형(rate-based)**
+> 초기 설계(아래 원문)는 **정원제** — 매 주기 `maxActive − activeCount`(빈자리)만큼 리필해 활성 인원을 상한으로 유지하는 back-pressure 모델이었다. 이후 **방류형**으로 전환했다: 매 **M초**마다 대기열 앞에서 **N명을 고정 방류**하고, 활성 점유량으로 gate하지 않는다(throughput = N/M). 두 노브 `release-size(N)`·`scheduler-interval-seconds(M)`를 yml로 직접 튜닝한다.
+> - **활성 카운트(`active:users`)는 gate가 아니라 관측·재진입 판정용**으로만 남는다(§2.5).
+> - **다중 인스턴스 안전성**: 방류형은 정원제의 gap 계산 같은 self-limiting이 없어 인스턴스마다 N명씩 pop하면 방류량이 곱해진다. 이를 **Lua 안의 고정 윈도우 레이트리밋**(`waiting:release:{floor(now/M)}` 카운터, M초 윈도우당 방류 ≤ N)으로 막는다 — ShedLock 없이 lock-free(§3.1).
+> 아래 본문은 원 설계를 보존하되, 방류형 반영 지점을 각 절에 인라인 표기(`[방류형]`)했다.
+
 [`01-requirements.md`](./01-requirements.md) §5·§9와 [`02-sequence-diagrams.md`](./02-sequence-diagrams.md)의 Redis 조작을 키 설계 수준으로 확정한다. 이 주차는 RDB 테이블을 추가하지 않는다(week7 ERD 불변). 모든 상태는 Redis에 둔다.
 
 ## 0. 전제 — 기존 Redis 인프라 (검증됨)
@@ -21,9 +27,10 @@
 | --- | --- | --- | --- | --- |
 | `waiting:queue` | ZSET | **master** | 없음(영속) | 대기 순서. member=userId, score=seq |
 | `waiting:seq` | String(INCR) | **master** | 없음 | 진입 순서 단조 증가 시퀀스(FIFO 타이브레이커) |
-| `pass:{token}` | String | **master** | 60s (D1) | 토큰→userId. 가드 검증·자동 만료 |
-| `user-pass:{userId}` | String | **master** | 60s | userId→token 역참조(중복 발급 방지·재조회) |
-| `active:users` | ZSET | **master** | 없음(원소별 score=만료시각) | 활성 인원 정확 카운트·back-pressure(D6) |
+| `waiting:release:{window}` | String(INCRBY) | **master** | ~3M | **[방류형]** M초 윈도우별 방류 누계. 레이트리밋(윈도우당 ≤ N) |
+| `pass:{token}` | String | **master** | 30s (D1 개정) | 토큰→userId. 가드 검증·자동 만료 |
+| `user-pass:{userId}` | String | **master** | 30s | userId→token 역참조(중복 발급 방지·재조회) |
+| `active:users` | ZSET | **master** | 없음(원소별 score=만료시각) | 활성 인원 카운트. **[방류형]** gate 아님 — 관측·재진입(READY) 판정용 |
 | `rank:cache:{userId}` | String(JSON) | default(replica 허용) | 1~2s (D5) | 순번 조회 결과 캐시 |
 
 > 키 네임스페이스에 `waiting:` / `pass:` / `active:` 접두어를 두어 향후 이벤트·상품별 큐 분리 시 `waiting:{eventId}:queue` 형태로 확장 가능하게 한다(01 Scope: 단일 글로벌 큐로 시작).
@@ -69,13 +76,13 @@
 - **member** = userId, **score** = 만료시각(epoch ms) = 발급시각 + TTL.
 - 발급: `ZADD active:users <now+60000> <userId>`.
 - 소모(주문 성공): `ZREM active:users <userId>`.
-- **정확 카운트 (스케줄러 매 주기)**:
+- ~~**정원제 정확 카운트 (스케줄러 매 주기)**~~ (원 설계):
   1. `ZREMRANGEBYSCORE active:users 0 <now>` — 만료 원소 일괄 제거.
   2. `ZCARD active:users` → 현재 활성 인원 `activeCount`.
   3. `batchSize = max(0, maxActive − activeCount)` (P-5, D2).
-- **왜 필요한가**: `pass:{token}` 개별 TTL만으론 "지금 활성 몇 명"을 O(1)로 셀 수 없어 스케줄러가 리필량을 못 정한다. `active:users`가 활성 카운트의 단일 진실원(SoT). TTL 자동삭제(`pass`)와 명시적 청소(`active` ZREMRANGEBYSCORE)를 병행하는 이유다.
+- **[방류형] 변경**: 활성 카운트는 **더 이상 방류량을 정하지 않는다**. 방류량은 §3.1 Lua의 윈도우 예산(`N − 이번_윈도우_방류누계`)이 정한다. `active:users`는 이제 (a) 관측(admin `activeCount`), (b) 진입 시 이미 활성인 유저 O(1) 판정(`isActive` → 즉시 READY, 재큐잉 방지) 두 용도로만 쓴다. 만료 청소(`ZREMRANGEBYSCORE`)는 그대로 유지해 이 두 값을 정확히 유지한다.
 
-> **정합성 주의**: `pass:{token}`(TTL 자동)과 `active:users`(명시 청소)는 만료 타이밍이 미세하게 어긋날 수 있다(pass는 60s 정확, active는 다음 스케줄러 주기에 청소). 이는 **back-pressure를 보수적으로** 만들 뿐(활성을 실제보다 잠깐 많게 셈 → 덜 발급) 상한 초과 방향의 위험은 없어 안전하다.
+> **[방류형] 정합성**: 활성 상한이 없어졌으므로 "back-pressure 보수성" 논의는 무의미하다. 대신 동시 DB 부하 = 유효 토큰 보유자 수 ≈ (방류 레이트 N/M) × TTL(리틀의 법칙)로 결정된다. 그래서 **N/M과 TTL을 DB가 견디는 동시성 이하로 잡는 것**이 방류형의 안전 조건이다(06 재해석·안전캡 논의 참조).
 
 ### 2.6 `rank:cache:{userId}` — 순번 캐시 (String, D5)
 
@@ -93,32 +100,41 @@
 
 **채택: Lua 스크립트로 pop+발급 원자화.** 스케줄러가 `EVAL`로 아래를 한 번에 실행한다.
 
+**[방류형] 현행 스크립트** — 활성 상한(ZCARD gate) 대신 **고정 윈도우 레이트리밋**으로 방류량을 정한다. `pass`·`user-pass` 저장까지 Lua 안에서 처리해 3키 발급이 한 번에 원자화된다(원 설계의 "애플리케이션이 뒤이어 SET" 분리 없음).
+
 ```lua
--- KEYS: waiting:queue, active:users
--- ARGV: k(뽑을 수), now, ttlMs, maxActive, [token_1..token_k 선생성]
--- 1) 만료 청소 + 활성 카운트
-redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, ARGV[2])
-local active = redis.call('ZCARD', KEYS[2])
-local room = tonumber(ARGV[4]) - active
-if room <= 0 then return {} end
-local n = math.min(tonumber(ARGV[1]), room)
--- 2) 앞에서 n명 pop + 활성 등록 (token은 애플리케이션이 미리 생성해 ARGV로 전달)
-local popped = redis.call('ZPOPMIN', KEYS[1], n)  -- [member, score, ...]
+-- KEYS[1]=waiting:queue, KEYS[2]=active:users
+-- ARGV[1]=now(ms), ARGV[2]=N(release-size), ARGV[3]=intervalMs(M*1000),
+--   ARGV[4]=ttlSeconds, ARGV[5]=windowPrefix, ARGV[6]=passPrefix, ARGV[7]=userPassPrefix,
+--   ARGV[8..]=후보 토큰(방류분만 소비). 반환=[userId, ...]
+local now = tonumber(ARGV[1]); local n = tonumber(ARGV[2]); local intervalMs = tonumber(ARGV[3])
+local ttl = tonumber(ARGV[4])
+local windowKey = ARGV[5] .. math.floor(now / intervalMs)     -- 고정 윈도우(M초 단위)
+local already = tonumber(redis.call('GET', windowKey) or '0')
+local budget = n - already                                    -- 이번 윈도우 방류 여유분
+if budget <= 0 then return {} end
+redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, now)               -- 활성 만료 청소(관측용)
+local popped = redis.call('ZPOPMIN', KEYS[1], budget)         -- 앞에서 budget명(FIFO)
+local cnt = #popped / 2
+if cnt == 0 then return {} end
+local expireAt = now + ttl * 1000
 local issued = {}
-local expireAt = tonumber(ARGV[2]) + tonumber(ARGV[3])
-local ai = 5  -- ARGV[5]부터 토큰
-for i = 1, #popped, 2 do
-  local uid = popped[i]
-  redis.call('ZADD', KEYS[2], expireAt, uid)
-  issued[#issued+1] = uid
-  issued[#issued+1] = ARGV[ai]; ai = ai + 1
+for i = 1, cnt do
+  local uid = popped[(i-1)*2 + 1]
+  local token = ARGV[7 + i]
+  redis.call('SET', ARGV[6] .. token, uid, 'EX', ttl)         -- pass:{token}
+  redis.call('SET', ARGV[7] .. uid, token, 'EX', ttl)         -- user-pass:{userId}
+  redis.call('ZADD', KEYS[2], expireAt, uid)                  -- active:users
+  issued[i] = uid
 end
-return issued  -- [userId, token, ...]
+redis.call('INCRBY', windowKey, cnt)                          -- 윈도우 방류 누계
+redis.call('PEXPIRE', windowKey, intervalMs * 3)              -- 윈도우 지나면 소멸
+return issued
 ```
 
-이후 애플리케이션이 반환된 `(userId, token)` 쌍마다 `SET pass:{token}`·`SET user-pass:{userId}`를 TTL과 함께 기록한다. **pop+active 등록이 원자적**이므로 상한 초과·중복 pop이 없다. `pass` 키 저장이 뒤따르다 실패해도 `active`에 등록돼 있어 슬롯은 TTL로 회수되고, 그 유저는 다음 재진입으로 복구(공정성 유지).
+**원자성 보장**: `GET 윈도우 → ZPOPMIN → 발급 → INCRBY`가 Redis 싱글스레드로 통째 원자 실행된다. 여러 인스턴스가 같은 M초 윈도우에 동시 호출해도 `budget`이 공유 카운터로 줄어들어 **윈도우당 방류 총합 ≤ N**이 보장된다(초과 방류 없음). 후보 토큰은 N개 미리 만들어 넘기고 실제 방류분(`cnt`)만 소비한다.
 
-> 단순화 대안: pop과 발급을 애플리케이션 트랜잭션 없이 순차 실행하고, 저장 실패 시 해당 userId를 `ZADD`로 큐에 되돌리는 보상. Lua보다 구현은 쉬우나 상한 초과 경쟁(다중 인스턴스)에 약하다 — **ShedLock으로 스케줄러가 단일 실행(NFR-5)이므로 실은 다중 인스턴스 경쟁은 없다.** 그럼에도 Lua를 기본으로 두는 이유는 "부분 실패 시 상태 정합"을 한 번에 보장하기 위해서다.
+> ~~원 설계 주석: ShedLock으로 스케줄러 단일 실행(NFR-5)이라 다중 인스턴스 경쟁 없음~~ → **[방류형] 폐기**. 정원제는 gap 계산이 self-limiting이라 락이 옵션이었지만(2026-07-08 Lua 원자화로 ShedLock 제거), 방류형은 인스턴스마다 독립적으로 N명 pop → 방류량이 인스턴스 수만큼 곱해진다. **윈도우 레이트리밋이 이 곱셈을 막는 핵심 장치**이며, 덕분에 ShedLock을 되살리지 않고 lock-free를 유지한다(윈도우 경계에서 최대 2N까지 순간 초과 가능 — admission control 허용 오차).
 
 ### 3.2 멱등 진입 경쟁 (FR-1)
 
@@ -146,8 +162,8 @@ return issued  -- [userId, token, ...]
 `GET /api/v1/admin/waiting-queue/status`가 노출하고 Prometheus로도 내보낼 지표:
 
 - `waiting_queue_size` = `ZCARD waiting:queue` (대기 인원)
-- `waiting_active_count` = `ZCARD active:users`(청소 후) (활성 인원)
-- `waiting_max_active`, `waiting_batch_size`, `waiting_throughput_per_sec` (정책 파생값)
+- `waiting_active_count` = `ZCARD active:users`(청소 후) (활성 인원) — **[방류형] gate 아님, 관측용**
+- `waiting_release_size`(N), `waiting_release_interval_sec`(M), `waiting_throughput_per_sec`(=N/M) (정책 파생값)
 - `waiting_tokens_issued_total`, `waiting_tokens_expired_total`, `waiting_tokens_consumed_total` (카운터)
 - `waiting_eta_seconds`(대기열 꼬리 기준 예상 대기) — 튜닝 관측용
 

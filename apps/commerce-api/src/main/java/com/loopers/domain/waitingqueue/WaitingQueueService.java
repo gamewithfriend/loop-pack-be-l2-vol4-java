@@ -55,19 +55,21 @@ public class WaitingQueueService {
     }
 
     /**
-     * 토큰 발급 배치(FR-3, 스케줄러가 호출). 만료 청소 → 활성 여유분(maxActive - 활성)만큼 앞에서 pop → 발급을
-     * {@link TokenIssuer}가 단일 Lua 스크립트로 <b>원자 실행</b>한다. count-then-issue가 원자라 다중 인스턴스
-     * 동시 실행에도 활성 상한 초과가 없어 분산 락이 필요 없다. 발급 인원 수를 반환한다.
+     * 방류 배치(FR-3, 스케줄러가 호출). 이번 주기 방류 여유분(= N − 이번 윈도우 방류 누계)만큼 대기열 앞에서
+     * pop → 발급을 {@link TokenIssuer}가 단일 Lua 스크립트로 <b>원자 실행</b>한다. Redis 윈도우 레이트리밋이
+     * 방류량을 M초당 N명으로 묶으므로, 다중 인스턴스 동시 실행에도 주기당 방류 총합이 N을 넘지 않아 분산 락이
+     * 필요 없다. 이번에 방류한 인원 수를 반환한다.
      *
-     * <p>후보 토큰은 여유분 최대치(=maxActive)만큼 미리 만들어 넘기고, 실제 발급분만 스크립트가 소비한다.
+     * <p>후보 토큰은 방류 최대치(=N)만큼 미리 만들어 넘기고, 실제 방류분만 스크립트가 소비한다.
      */
     public int issueBatch() {
-        int maxActive = policy.maxActive();
-        List<String> candidates = new ArrayList<>(maxActive);
-        for (int i = 0; i < maxActive; i++) {
+        int releaseSize = policy.releaseSize();
+        List<String> candidates = new ArrayList<>(releaseSize);
+        for (int i = 0; i < releaseSize; i++) {
             candidates.add(newToken());
         }
-        List<Long> issued = issuer.issueFront(maxActive, policy.tokenTtlSeconds(), candidates);
+        List<Long> issued = issuer.issueFront(
+            releaseSize, policy.releaseIntervalSeconds(), policy.tokenTtlSeconds(), candidates);
         return issued.size();
     }
 
@@ -100,8 +102,8 @@ public class WaitingQueueService {
         return new WaitingQueueStatusView(
             queueSize,
             active,
-            policy.maxActive(),
-            policy.batchSize(active),
+            policy.releaseSize(),
+            policy.releaseIntervalSeconds(),
             policy.throughputPerSecond(),
             policy.estimatedWaitSeconds(queueSize)
         );

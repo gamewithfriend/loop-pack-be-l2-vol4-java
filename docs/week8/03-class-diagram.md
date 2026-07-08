@@ -1,5 +1,7 @@
 # 03. 클래스 다이어그램 — Redis 기반 대기열 (Virtual Waiting Room)
 
+> **⚠️ 2026-07-08 방류형 전환**: `ThroughputPolicy`의 `dbPoolSize/reserveRatio/avgProcessSeconds`·`maxActive()`·`batchSize()`는 폐기됐다. 현행은 방류형 노브 `releaseSize(N)`·`releaseIntervalSeconds(M)` + `throughputPerSecond()=N/M`. 신규 포트 `TokenIssuer`(구현 `RedisTokenIssuer`, Lua 윈도우 레이트리밋)가 발급 원자성을 담당. 정설은 [`04-redis-model.md`](./04-redis-model.md)·코드.
+
 [`01-requirements.md`](./01-requirements.md) §5 도메인 모델과 [`02-sequence-diagrams.md`](./02-sequence-diagrams.md)의 참여자를 클래스/컴포넌트 수준으로 구체화한다. 이 주차는 **JPA 엔티티가 아니라 Redis 자료구조 + 애플리케이션 컴포넌트**가 중심이므로, 도메인 모델은 값 객체·서비스 위주로 표현한다. Redis 키 상세는 [`04-redis-model.md`](./04-redis-model.md).
 
 ## 0. 패키지 배치 (기존 컨벤션 준수)
@@ -62,14 +64,17 @@ classDiagram
 
     class ThroughputPolicy {
         <<Value Object>>
-        +int dbPoolSize
-        +double reserveRatio
-        +double avgProcessSeconds
+        +int releaseSize
         +int schedulerIntervalSeconds
-        +int maxActive()
+        +int tokenTtlSeconds
+        +int releaseSize()
+        +int releaseIntervalSeconds()
         +double throughputPerSecond()
-        +int batchSize(int activeCount)
         +long estimatedWaitSeconds(long aheadCount)
+    }
+    class TokenIssuer {
+        <<Port>>
+        +List issueFront(releaseSize, intervalSeconds, ttlSeconds, tokens)
     }
 
     class WaitingQueueService {
@@ -109,7 +114,7 @@ classDiagram
     WaitingQueueService --> ThroughputPolicy
     WaitingQueueService ..> EntryToken : issues/validates
     WaitingQueueService ..> QueueStatus
-    ThroughputPolicy ..> EntryToken : maxActive→TTL 슬롯
+    ThroughputPolicy ..> EntryToken : N/M 방류 레이트
 ```
 
 ### 값 객체 규칙
@@ -185,21 +190,20 @@ classDiagram
 [`01`](./01-requirements.md) §NFR-4·§9-D2의 산식을 그대로 반영한다.
 
 ```java
-// 설정값 (WaitingQueueProperties, application.yml: waiting-queue.*)
-dbPoolSize              = 40      // 측정값: HikariCP maximum-pool-size
-reserveRatio            = 0.25    // 조회/릴레이/리컨사일 헤드룸
-avgProcessSeconds       = 0.5     // 주문 1건 서버 처리(재고·쿠폰·PG 왕복) 가정
-schedulerIntervalSeconds= 2
-tokenTtlSeconds         = 60      // D1
+// [방류형] 설정값 (WaitingQueueProperties, application.yml: waiting-queue.*)
+releaseSize             = 30      // N: 한 주기 방류 인원
+schedulerIntervalSeconds= 2       // M: 방류 주기(초)
+tokenTtlSeconds         = 30      // D1(개정)
 
-// 파생값
-maxActive()          = floor(dbPoolSize * (1 - reserveRatio)) = 30
-throughputPerSecond()= maxActive() / avgProcessSeconds       = 60 (주문/초)
-batchSize(active)    = max(0, maxActive() - active)           // 활성까지만 리필(P-5)
+// [방류형] 파생값
+releaseSize()          = 30                                   // N
+releaseIntervalSeconds()= 2                                   // M
+throughputPerSecond()  = releaseSize / intervalSeconds = N/M = 15 (주문/초)
 estimatedWaitSeconds(ahead) = ceil(ahead / throughputPerSecond())
+// maxActive()/batchSize()는 폐기(활성 상한 gate 없음). 방류량은 Lua 윈도우 예산(N − 윈도우누계)이 결정.
 ```
 
-> 모든 수치는 `@ConfigurationProperties`로 외부화해 부하테스트 결과에 따라 코드 변경 없이 튜닝한다(D2 단서). `throughputPerSecond`은 ETA 계산과 배치 상한 산정 양쪽에서 재사용된다.
+> ~~(구설계) `maxActive = floor(dbPoolSize*(1-reserveRatio))`, `batchSize = max(0, maxActive-active)`~~ → 방류형에선 제거. 모든 수치는 `@ConfigurationProperties`로 외부화해 부하테스트로 튜닝(D2). `throughputPerSecond=N/M`은 ETA 계산에 재사용된다. 발급 원자성·다중 인스턴스 안전은 `TokenIssuer`(Lua)가 담당(04 §3.1).
 
 ---
 

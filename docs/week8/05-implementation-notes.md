@@ -2,6 +2,8 @@
 
 구현 중 실제 코드베이스 컨벤션에 맞추며 01~04 설계에서 조정한 부분을 기록한다. (설계 문서의 의도·정책은 그대로 유효하며, 여기서는 표현/배치만 바뀐 지점을 정리한다.)
 
+> **⚠️ 2026-07-08 방류형 전환**: 아래 발급 관련 노트(§ ShedLock 순차실행+재큐잉, status 응답의 `maxActive/nextBatchSize`)는 정원제 기준이라 폐기됐다. 현행은 **방류형 + Lua 윈도우 레이트리밋**(발급 원자성·다중 인스턴스 안전을 `RedisTokenIssuer` Lua가 담당, ShedLock 없음), status 응답 필드는 `releaseSize/releaseIntervalSeconds`로 변경. 정설은 [`04`](./04-redis-model.md)·[`06`](./06-loadtest-ttl.md)·코드.
+
 ## 1. 인증 헤더 — `X-USER-ID` → `X-Loopers-LoginId/LoginPw`
 
 - 01~04는 유저 식별을 `X-USER-ID` 헤더로 가정했으나, commerce-api의 실제 컨벤션은 `X-Loopers-LoginId` + `X-Loopers-LoginPw` 헤더 인증 → `UserFacade.authenticate()` → `userId`다. (`X-USER-ID`는 외부 pg-simulator 연동 전용 헤더였다.)
@@ -23,11 +25,11 @@
 ## 4. Admin 경로 — `/api/v1/admin/...` → `/api-admin/v1/waiting-queue/status`
 
 - 기존 Admin 컨트롤러 컨벤션이 `/api-admin/v1/...`이라 이를 따랐다. 권한 체계는 다른 Admin API와 동일하게 미적용(운영 시 인가 선행 필요).
-- 응답 필드: `queueSize, activeCount, maxActive, nextBatchSize, throughputPerSecond, estimatedTailWaitSeconds`.
+- 응답 필드: `queueSize, activeCount, releaseSize, releaseIntervalSeconds, throughputPerSecond, estimatedTailWaitSeconds`. (~~구: maxActive, nextBatchSize~~ → 방류형 노브로 교체)
 
 ## 5. 배치 발급 원자성 — Lua 미적용(단일 실행으로 대체)
 
-- 04 §3.1은 Lua로 pop+활성등록 원자화를 이상형으로 제시했다. 구현은 **ShedLock 단일 실행**(NFR-5)에 기대어, `purgeExpiredAndCount → batchSize → popFront → issue` 순차 실행 + **발급 실패 유저 재큐잉**(`queue.requeue`)으로 유실을 방지했다. 다중 인스턴스 경쟁이 ShedLock으로 없으므로 상한 초과 위험은 없다. (부하 상황에서 정합 이슈가 관측되면 04 §3.1의 Lua로 승급.)
+- 04 §3.1의 Lua 원자화를 **채택**했다(초기 순차실행+ShedLock+재큐잉 → 2026-07-08 Lua로 승급, 이어서 방류형 전환). 현행 `RedisTokenIssuer`가 `윈도우예산 계산 → ZPOPMIN → pass/user-pass/active 발급 → 윈도우 INCRBY`를 단일 Lua로 원자 실행한다. **ShedLock 없이** 다중 인스턴스 방류 총합이 M초당 N으로 고정된다. `purgeExpiredAndCount/popFront/requeue` 등 순차실행 잔재는 제거됨.
 
 ## 6. EntryToken VO 미도입
 

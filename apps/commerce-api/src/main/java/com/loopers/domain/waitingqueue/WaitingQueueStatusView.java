@@ -6,8 +6,8 @@ package com.loopers.domain.waitingqueue;
 public record WaitingQueueStatusView(
     long queueSize,
     long activeCount,
-    int maxActive,
-    int nextBatchSize,
+    int releaseSize,
+    int releaseIntervalSeconds,
     double throughputPerSecond,
     long estimatedTailWaitSeconds
 ) {
