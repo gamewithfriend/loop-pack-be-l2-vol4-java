@@ -104,16 +104,22 @@
 
 ```lua
 -- KEYS[1]=waiting:queue, KEYS[2]=active:users
--- ARGV[1]=now(ms), ARGV[2]=N(release-size), ARGV[3]=intervalMs(M*1000),
---   ARGV[4]=ttlSeconds, ARGV[5]=windowPrefix, ARGV[6]=passPrefix, ARGV[7]=userPassPrefix,
---   ARGV[8..]=후보 토큰(방류분만 소비). 반환=[userId, ...]
+-- ARGV[1]=now(ms), ARGV[2]=N(release-size), ARGV[3]=intervalMs(M*1000), ARGV[4]=ttlSeconds,
+--   ARGV[5]=hardMax(0=비활성), ARGV[6]=windowPrefix, ARGV[7]=passPrefix, ARGV[8]=userPassPrefix,
+--   ARGV[9..]=후보 토큰(방류분만 소비). 반환=[userId, ...]
 local now = tonumber(ARGV[1]); local n = tonumber(ARGV[2]); local intervalMs = tonumber(ARGV[3])
-local ttl = tonumber(ARGV[4])
-local windowKey = ARGV[5] .. math.floor(now / intervalMs)     -- 고정 윈도우(M초 단위)
+local ttl = tonumber(ARGV[4]); local hardMax = tonumber(ARGV[5])
+local windowKey = ARGV[6] .. math.floor(now / intervalMs)     -- 고정 윈도우(M초 단위)
 local already = tonumber(redis.call('GET', windowKey) or '0')
-local budget = n - already                                    -- 이번 윈도우 방류 여유분
+local budget = n - already                                    -- ① 윈도우 방류 여유분(레이트)
 if budget <= 0 then return {} end
-redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, now)               -- 활성 만료 청소(관측용)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, now)               -- 활성 만료 청소
+if hardMax > 0 then                                           -- ② 안전망: 활성 상한 여유분(선택 B)
+  local active = redis.call('ZCARD', KEYS[2])
+  local headroom = hardMax - active
+  if headroom < budget then budget = headroom end            --   ①②중 작은 쪽으로 조임
+  if budget <= 0 then return {} end
+end
 local popped = redis.call('ZPOPMIN', KEYS[1], budget)         -- 앞에서 budget명(FIFO)
 local cnt = #popped / 2
 if cnt == 0 then return {} end
@@ -121,9 +127,9 @@ local expireAt = now + ttl * 1000
 local issued = {}
 for i = 1, cnt do
   local uid = popped[(i-1)*2 + 1]
-  local token = ARGV[7 + i]
-  redis.call('SET', ARGV[6] .. token, uid, 'EX', ttl)         -- pass:{token}
-  redis.call('SET', ARGV[7] .. uid, token, 'EX', ttl)         -- user-pass:{userId}
+  local token = ARGV[8 + i]
+  redis.call('SET', ARGV[7] .. token, uid, 'EX', ttl)         -- pass:{token}
+  redis.call('SET', ARGV[8] .. uid, token, 'EX', ttl)         -- user-pass:{userId}
   redis.call('ZADD', KEYS[2], expireAt, uid)                  -- active:users
   issued[i] = uid
 end
@@ -132,7 +138,9 @@ redis.call('PEXPIRE', windowKey, intervalMs * 3)              -- 윈도우 지�
 return issued
 ```
 
-**원자성 보장**: `GET 윈도우 → ZPOPMIN → 발급 → INCRBY`가 Redis 싱글스레드로 통째 원자 실행된다. 여러 인스턴스가 같은 M초 윈도우에 동시 호출해도 `budget`이 공유 카운터로 줄어들어 **윈도우당 방류 총합 ≤ N**이 보장된다(초과 방류 없음). 후보 토큰은 N개 미리 만들어 넘기고 실제 방류분(`cnt`)만 소비한다.
+**안전망(선택 B, `hard-max-active`)**: 방류형은 활성 gate가 없어 처리 정체 시 활성이 폭주할 수 있다. `hardMax>0`이면 위 ②처럼 `hardMax − 현재활성`을 방류량 상한에 추가해, 활성이 상한에 닿으면 방류를 조인다(0=비활성=순수 방류형). 이는 주 제어(레이트 N/M)가 아니라 **비상 브레이크**이므로 정상 footprint(≈ N/M×TTL)보다 넉넉히 잡는다. DB 동시부하는 활성 수가 아니라 주문레이트×처리시간으로 정해지므로, 이 상한은 footprint/폭주 방어용이다.
+
+**원자성 보장**: `GET 윈도우 → (ZCARD) → ZPOPMIN → 발급 → INCRBY`가 Redis 싱글스레드로 통째 원자 실행된다. 여러 인스턴스가 같은 M초 윈도우에 동시 호출해도 `budget`이 공유 카운터로 줄어들어 **윈도우당 방류 총합 ≤ N**이 보장된다(초과 방류 없음). 후보 토큰은 N개 미리 만들어 넘기고 실제 방류분(`cnt`)만 소비한다.
 
 > ~~원 설계 주석: ShedLock으로 스케줄러 단일 실행(NFR-5)이라 다중 인스턴스 경쟁 없음~~ → **[방류형] 폐기**. 정원제는 gap 계산이 self-limiting이라 락이 옵션이었지만(2026-07-08 Lua 원자화로 ShedLock 제거), 방류형은 인스턴스마다 독립적으로 N명 pop → 방류량이 인스턴스 수만큼 곱해진다. **윈도우 레이트리밋이 이 곱셈을 막는 핵심 장치**이며, 덕분에 ShedLock을 되살리지 않고 lock-free를 유지한다(윈도우 경계에서 최대 2N까지 순간 초과 가능 — admission control 허용 오차).
 

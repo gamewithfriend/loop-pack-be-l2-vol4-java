@@ -55,6 +55,11 @@ public class ThroughputPolicy {
         return props.tokenTtlSeconds();
     }
 
+    /** 안전망 상한(0=비활성). 활성이 이 값에 도달하면 방류를 조인다(선택 B). */
+    public int hardMaxActive() {
+        return props.hardMaxActive();
+    }
+
     /**
      * 권장 폴링 주기(초). 대기 인원이 많을수록 넓혀 총 폴링 QPS를 억제한다(NFR-7).
      * 1000명당 +1초, 1~10초로 클램프.

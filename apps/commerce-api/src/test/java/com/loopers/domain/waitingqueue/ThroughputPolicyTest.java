@@ -14,16 +14,17 @@ class ThroughputPolicyTest {
 
     private ThroughputPolicy policy(int releaseSize, int intervalSeconds) {
         WaitingQueueProperties props = new WaitingQueueProperties(
-            true, releaseSize, intervalSeconds, 30, 2);
+            true, releaseSize, intervalSeconds, 30, 2, 500);
         return new ThroughputPolicy(props);
     }
 
     @Test
-    @DisplayName("releaseSize(N)·interval(M)은 프로퍼티 그대로 노출한다")
+    @DisplayName("releaseSize(N)·interval(M)·hardMax는 프로퍼티 그대로 노출한다")
     void knobs() {
         ThroughputPolicy p = policy(30, 2);
         assertThat(p.releaseSize()).isEqualTo(30);
         assertThat(p.releaseIntervalSeconds()).isEqualTo(2);
+        assertThat(p.hardMaxActive()).isEqualTo(500);
     }
 
     @Test

@@ -13,13 +13,15 @@ import java.util.List;
 public interface TokenIssuer {
 
     /**
-     * 이번 주기 방류 여유분(= N − 이번 윈도우에서 이미 방류한 수)만큼 대기열 앞에서 원자적으로 pop·발급한다.
+     * 이번 주기 방류 여유분만큼 대기열 앞에서 원자적으로 pop·발급한다.
+     * 방류량 = min(윈도우 여유분 {@code N − 윈도우누계}, 안전망 여유분 {@code hardMaxActive − 현재활성}).
      *
      * @param releaseSize     N. 한 주기(윈도우)에 방류할 최대 인원.
      * @param intervalSeconds M. 방류 주기(초) = 레이트리밋 윈도우 크기.
      * @param ttlSeconds      발급 토큰 TTL(초).
+     * @param hardMaxActive   안전망 상한. 활성이 이 값에 도달하면 방류를 조인다(0=비활성=순수 방류형).
      * @param tokens          후보 토큰. 최소 {@code releaseSize}개여야 하며, 실제 방류분(≤ 여유분)만 소비된다.
      * @return 이번 배치에서 방류된 userId 목록(방류 인원 = size).
      */
-    List<Long> issueFront(int releaseSize, int intervalSeconds, int ttlSeconds, List<String> tokens);
+    List<Long> issueFront(int releaseSize, int intervalSeconds, int ttlSeconds, int hardMaxActive, List<String> tokens);
 }

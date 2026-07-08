@@ -74,6 +74,7 @@ waiting-queue:
   scheduler-interval-seconds: 2   # M: 방류 주기(초) → throughput = 30 / 2 = 15/s
   token-ttl-seconds: 30           # D1(개정) — TTL 스윕 시뮬레이션 결과 30s가 배수시간 최소·처리량 최고(docs/week8/06)
   rank-cache-seconds: 2           # D5
+  hard-max-active: 500            # 안전망 상한(선택 B, 0=비활성). 활성이 이 값 도달 시 방류 조임. 정상 footprint(≈N/M×TTL)보다 넉넉히
 
 # PENDING 결제 자동 정리(reconcile) 스케줄러 — 콜백 유실 안전망. 멀티 인스턴스 중복은 ShedLock으로 차단.
 payment:

@@ -69,7 +69,8 @@ public class WaitingQueueService {
             candidates.add(newToken());
         }
         List<Long> issued = issuer.issueFront(
-            releaseSize, policy.releaseIntervalSeconds(), policy.tokenTtlSeconds(), candidates);
+            releaseSize, policy.releaseIntervalSeconds(), policy.tokenTtlSeconds(),
+            policy.hardMaxActive(), candidates);
         return issued.size();
     }
 

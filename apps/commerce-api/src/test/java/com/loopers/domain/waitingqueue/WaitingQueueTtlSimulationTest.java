@@ -61,9 +61,9 @@ class WaitingQueueTtlSimulationTest {
     @Test
     @DisplayName("TTL 스윕: 처리량/이탈낭비/바운스 트레이드오프 표 출력")
     void sweepTokenTtl() {
-        // releaseSize가 실제 정책값과 일치하는지 확인(문서 D2)
+        // releaseSize가 실제 정책값과 일치하는지 확인(문서 D2). 안전캡(hardMax)은 이 sim에서 미모델(0).
         ThroughputPolicy policy = new ThroughputPolicy(
-            new WaitingQueueProperties(true, 30, 2, 30, 2));
+            new WaitingQueueProperties(true, 30, 2, 30, 2, 0));
         assertThat(policy.releaseSize()).isEqualTo(RELEASE_N);
 
         // 유저 특성 1회 생성 → 모든 TTL 런에서 재사용(공정 비교)

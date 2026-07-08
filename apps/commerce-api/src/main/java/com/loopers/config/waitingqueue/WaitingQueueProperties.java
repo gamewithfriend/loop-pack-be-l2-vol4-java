@@ -23,6 +23,12 @@ public record WaitingQueueProperties(
     /** 입장 토큰 TTL(초, D1 개정 — TTL 스윕 시뮬레이션으로 60→30 조정, docs/week8/06). */
     @DefaultValue("30") int tokenTtlSeconds,
     /** 순번 조회 결과 캐시 TTL(초, D5). */
-    @DefaultValue("2") int rankCacheSeconds
+    @DefaultValue("2") int rankCacheSeconds,
+    /**
+     * 안전망 상한(선택 B). 활성 토큰 보유자 수가 이 값에 도달하면 그 주기 방류를 조인다(0=비활성=순수 방류형).
+     * 방류형은 활성 gate가 없어, 처리 정체로 avgProcess가 나빠지면 활성이 비정상 급증할 수 있다. 이 상한은
+     * 그 폭주만 막는 <b>비상 브레이크</b>이지 주 제어가 아니다 → 정상 footprint(≈ N/M×TTL)보다 넉넉히 잡는다.
+     */
+    @DefaultValue("500") int hardMaxActive
 ) {
 }
