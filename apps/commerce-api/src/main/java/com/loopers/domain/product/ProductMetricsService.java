@@ -19,11 +19,11 @@ public class ProductMetricsService {
 
     private final ProductMetricsRepository productMetricsRepository;
 
-    /** 활성 상품 id 목록(정렬 순서 보존) — 리스팅 정렬/필터/페이지 (UC-03). */
+    /** 활성 상품 id 키셋 페이지(정렬 순서 보존, size+1 반환) — 리스팅 정렬/필터/커서 (UC-03). */
     @Transactional(readOnly = true)
-    public List<Long> getActiveProductIdsPage(Long brandId, ProductSortType sort, int page, int size) {
-        PagePolicy.validate(page, size);
-        return productMetricsRepository.findActiveIdsPage(brandId, sort, page, size);
+    public List<Long> getActiveProductIdsPage(Long brandId, ProductSortType sort, ProductCursor cursor, int size) {
+        PagePolicy.validateSize(size);
+        return productMetricsRepository.findActiveIdsPage(brandId, sort, cursor, size);
     }
 
     /** 좋아요 수 batch — 목록/내가 좋아요한 목록 조합용. 없는 id 는 0으로 보정해 채운다. */

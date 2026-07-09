@@ -15,6 +15,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,11 +60,11 @@ class ProductV1ApiE2ETest {
         testRestTemplate.exchange(PRODUCTS_PATH + "/" + productId, HttpMethod.DELETE, HttpEntity.EMPTY, Object.class);
     }
 
-    private static final ParameterizedTypeReference<ApiResponse<List<ProductV1Dto.ProductResponse>>> LIST_TYPE =
+    private static final ParameterizedTypeReference<ApiResponse<ProductV1Dto.ProductListPageResponse>> PAGE_TYPE =
             new ParameterizedTypeReference<>() {};
 
-    private ResponseEntity<ApiResponse<List<ProductV1Dto.ProductResponse>>> getList(String query) {
-        return testRestTemplate.exchange(PRODUCTS_PATH + query, HttpMethod.GET, HttpEntity.EMPTY, LIST_TYPE);
+    private ResponseEntity<ApiResponse<ProductV1Dto.ProductListPageResponse>> getList(String query) {
+        return testRestTemplate.exchange(PRODUCTS_PATH + query, HttpMethod.GET, HttpEntity.EMPTY, PAGE_TYPE);
     }
 
     @DisplayName("GET /api/v1/products — 목록·정렬·필터")
@@ -78,13 +79,13 @@ class ProductV1ApiE2ETest {
             createProduct(brandId, "A", 1000L);
             createProduct(brandId, "C", 2000L);
 
-            ResponseEntity<ApiResponse<List<ProductV1Dto.ProductResponse>>> response = getList("?sort=PRICE_ASC");
+            ResponseEntity<ApiResponse<ProductV1Dto.ProductListPageResponse>> response = getList("?sort=PRICE_ASC");
 
-            List<ProductV1Dto.ProductResponse> data = response.getBody().data();
+            List<ProductV1Dto.ProductListItemResponse> data = response.getBody().data().items();
             assertAll(
                     () -> assertThat(response.getStatusCode().is2xxSuccessful()).isTrue(),
                     () -> assertThat(data).hasSize(3),
-                    () -> assertThat(data).extracting(ProductV1Dto.ProductResponse::price)
+                    () -> assertThat(data).extracting(ProductV1Dto.ProductListItemResponse::price)
                             .containsExactly(1000L, 2000L, 3000L)
             );
         }
@@ -97,9 +98,9 @@ class ProductV1ApiE2ETest {
             createProduct(nike, "에어맥스", 139000L);
             createProduct(adidas, "울트라부스트", 159000L);
 
-            ResponseEntity<ApiResponse<List<ProductV1Dto.ProductResponse>>> response = getList("?brandId=" + nike);
+            ResponseEntity<ApiResponse<ProductV1Dto.ProductListPageResponse>> response = getList("?brandId=" + nike);
 
-            List<ProductV1Dto.ProductResponse> data = response.getBody().data();
+            List<ProductV1Dto.ProductListItemResponse> data = response.getBody().data().items();
             assertAll(
                     () -> assertThat(data).hasSize(1),
                     () -> assertThat(data.get(0).brandId()).isEqualTo(nike)
@@ -114,9 +115,9 @@ class ProductV1ApiE2ETest {
             Long removed = createProduct(brandId, "삭제", 2000L);
             deleteProduct(removed);
 
-            ResponseEntity<ApiResponse<List<ProductV1Dto.ProductResponse>>> response = getList("");
+            ResponseEntity<ApiResponse<ProductV1Dto.ProductListPageResponse>> response = getList("");
 
-            List<ProductV1Dto.ProductResponse> data = response.getBody().data();
+            List<ProductV1Dto.ProductListItemResponse> data = response.getBody().data().items();
             assertAll(
                     () -> assertThat(data).hasSize(1),
                     () -> assertThat(data.get(0).id()).isEqualTo(keep)
@@ -147,18 +148,53 @@ class ProductV1ApiE2ETest {
             Long brandId = createBrand("나이키");
             createProduct(brandId, "에어맥스", 139000L);
 
-            List<ProductV1Dto.ProductListItemResponse> items = testRestTemplate.exchange(
-                    PRODUCTS_PATH, HttpMethod.GET, HttpEntity.EMPTY, ITEM_LIST_TYPE).getBody().data();
+            List<ProductV1Dto.ProductListItemResponse> items = getList("").getBody().data().items();
 
             assertThat(items).hasSize(1);
             assertThat(items.get(0).brandName()).isEqualTo("나이키");
         }
+
+        @DisplayName("커서로 다음 페이지를 이어 받으면, 중복 없이 전체를 순회한다. (키셋)")
+        @Test
+        void traversesAllPagesByCursor() {
+            Long brandId = createBrand("나이키");
+            Long p1 = createProduct(brandId, "A", 1000L);
+            Long p2 = createProduct(brandId, "B", 2000L);
+            Long p3 = createProduct(brandId, "C", 3000L);
+
+            ProductV1Dto.ProductListPageResponse page1 = getList("?size=2").getBody().data();
+            assertAll(
+                    () -> assertThat(page1.items()).hasSize(2),
+                    () -> assertThat(page1.hasNext()).isTrue(),
+                    () -> assertThat(page1.nextCursor()).isNotBlank()
+            );
+
+            ProductV1Dto.ProductListPageResponse page2 =
+                    getList("?size=2&cursor=" + page1.nextCursor()).getBody().data();
+            assertAll(
+                    () -> assertThat(page2.items()).hasSize(1),
+                    () -> assertThat(page2.hasNext()).isFalse(),
+                    () -> assertThat(page2.nextCursor()).isNull()
+            );
+
+            // 두 페이지 합치면 생성한 3건이 중복 없이 모두 나온다 (LATEST = id DESC → p3,p2,p1).
+            List<Long> ids = new ArrayList<>();
+            page1.items().forEach(i -> ids.add(i.id()));
+            page2.items().forEach(i -> ids.add(i.id()));
+            assertThat(ids).containsExactly(p3, p2, p1);
+        }
+
+        @DisplayName("위조·손상된 커서를 주면, 400을 반환한다.")
+        @Test
+        void returns400_whenCursorMalformed() {
+            ResponseEntity<Object> response = testRestTemplate.exchange(
+                    PRODUCTS_PATH + "?cursor=not_a_valid_cursor", HttpMethod.GET, HttpEntity.EMPTY, Object.class);
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        }
     }
 
     // --- 좋아요 여부 표시 (UC-03 step3) ---
-
-    private static final ParameterizedTypeReference<ApiResponse<List<ProductV1Dto.ProductListItemResponse>>> ITEM_LIST_TYPE =
-            new ParameterizedTypeReference<>() {};
 
     private HttpHeaders authHeaders(String loginId) {
         HttpHeaders headers = new HttpHeaders();
@@ -196,8 +232,8 @@ class ProductV1ApiE2ETest {
             like(liked, "testid");
 
             List<ProductV1Dto.ProductListItemResponse> items = testRestTemplate.exchange(
-                    PRODUCTS_PATH, HttpMethod.GET, new HttpEntity<>(authHeaders("testid")), ITEM_LIST_TYPE)
-                    .getBody().data();
+                    PRODUCTS_PATH, HttpMethod.GET, new HttpEntity<>(authHeaders("testid")), PAGE_TYPE)
+                    .getBody().data().items();
 
             assertThat(likedOf(items, liked)).isTrue();
             assertThat(likedOf(items, notLiked)).isFalse();
@@ -211,8 +247,7 @@ class ProductV1ApiE2ETest {
             Long productId = createProduct(brandId, "에어맥스", 139000L);
             like(productId, "testid");
 
-            List<ProductV1Dto.ProductListItemResponse> items = testRestTemplate.exchange(
-                    PRODUCTS_PATH, HttpMethod.GET, HttpEntity.EMPTY, ITEM_LIST_TYPE).getBody().data();
+            List<ProductV1Dto.ProductListItemResponse> items = getList("").getBody().data().items();
 
             assertThat(items).isNotEmpty();
             assertThat(items).allSatisfy(i -> assertThat(i.liked()).isFalse());

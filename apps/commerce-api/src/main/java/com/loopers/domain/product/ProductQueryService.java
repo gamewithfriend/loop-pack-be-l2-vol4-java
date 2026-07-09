@@ -5,6 +5,9 @@ import com.loopers.domain.brand.BrandService;
 import com.loopers.domain.like.LikeModel;
 import com.loopers.domain.like.LikeService;
 import com.loopers.domain.stock.StockService;
+import com.loopers.support.error.CoreException;
+import com.loopers.support.error.ErrorType;
+import com.loopers.support.page.ProductCursorCodec;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,6 +31,7 @@ public class ProductQueryService {
     private final BrandService brandService;
     private final LikeService likeService;
     private final StockService stockService;
+    private final ProductCursorCodec cursorCodec;
 
     /**
      * 상품 상세 — 활성 Product + 활성 Brand + 재고 수량 + 좋아요 수 조합 (<b>사용자 무관</b>, 캐시 가능).
@@ -44,13 +48,15 @@ public class ProductQueryService {
     }
 
     /**
-     * 상품 목록 — 정렬·페이지·브랜드 필터는 read model(product_metrics) 단일 테이블에서 처리하고(좋아요순 포함),
+     * 상품 목록 — 정렬·키셋(커서)·브랜드 필터는 read model(product_metrics) 단일 테이블에서 처리하고(좋아요순 포함),
      * 그 id 순서 위에 표시 필드(product)·브랜드명·재고·좋아요 수를 batch(IN)로 조합해 N+1을 피한다
-     * (UC-03, <b>사용자 무관</b>, 캐시 가능). 좋아요 여부는 Facade가 별도 batch 조합한다.
+     * (UC-03, <b>사용자 무관</b>, 캐시 가능). 불투명 커서는 디코드해(정렬 일치 검증) 키셋 조회로 넘기고, hasNext
+     * 판별용 size+1 건을 그대로 흘려보낸다(잘라내기·nextCursor는 Facade). 좋아요 여부는 Facade가 별도 조합한다.
      */
     @Transactional(readOnly = true)
-    public List<ProductListEntry> getProductList(Long brandId, ProductSortType sort, int page, int size) {
-        List<Long> orderedIds = productMetricsService.getActiveProductIdsPage(brandId, sort, page, size);
+    public List<ProductListEntry> getProductList(Long brandId, ProductSortType sort, String cursor, int size) {
+        ProductCursor decoded = decodeCursor(sort, cursor);
+        List<Long> orderedIds = productMetricsService.getActiveProductIdsPage(brandId, sort, decoded, size);
         if (orderedIds.isEmpty()) {
             return List.of();
         }
@@ -93,5 +99,17 @@ public class ProductQueryService {
                 .map(l -> activeById.get(l.getProductId()))
                 .filter(Objects::nonNull)
                 .toList();
+    }
+
+    /** 빈 커서는 첫 페이지(null). 위조/손상 커서는 codec 이 BAD_REQUEST 로 막고, 정렬 불일치도 BAD_REQUEST. */
+    private ProductCursor decodeCursor(ProductSortType sort, String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return null;
+        }
+        ProductCursor decoded = cursorCodec.decode(cursor);
+        if (decoded.sort() != sort) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "커서의 정렬 기준이 요청 정렬과 일치하지 않습니다.");
+        }
+        return decoded;
     }
 }

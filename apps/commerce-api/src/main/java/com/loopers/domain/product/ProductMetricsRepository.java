@@ -11,10 +11,11 @@ import java.util.Map;
 public interface ProductMetricsRepository {
 
     /**
-     * 활성 상품 id 페이지 — brand 필터(null=전체) + 정렬 + 페이지. <b>정렬 순서를 보존</b>해 반환한다.
-     * 정렬키(like_count/price/product_id)가 모두 product_metrics 에 있어 단일 테이블 인덱스 스캔으로 처리된다.
+     * 활성 상품 id 키셋(커서) 페이지 — brand 필터(null=전체) + 정렬 + 커서(null=첫 페이지). <b>정렬 순서를 보존</b>하고
+     * hasNext 판별용으로 size+1 건까지 반환한다(잘라내기는 상위). 정렬키(like_count/price/product_id)가 모두
+     * product_metrics 에 있어 week5 DESC 복합 인덱스를 그대로 타 filesort 없이 처리된다.
      */
-    List<Long> findActiveIdsPage(Long brandId, ProductSortType sort, int page, int size);
+    List<Long> findActiveIdsPage(Long brandId, ProductSortType sort, ProductCursor cursor, int size);
 
     /** 좋아요 수 batch 조회(목록/내가 좋아요한 목록 조합). 행 없는 id 는 결과에서 빠진다 → 호출측 getOrDefault(id,0). */
     Map<Long, Long> findLikeCounts(Collection<Long> productIds);
