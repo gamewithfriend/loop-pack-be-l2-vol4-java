@@ -1,0 +1,175 @@
+# 03. 클래스 다이어그램 — 실시간 랭킹
+
+랭킹 관련 컴포넌트를 앱별로 정리한다. 두 앱은 코드를 공유하지 않으므로(앱 경계), ZSET 키 포맷은 **문자열 계약**으로만 맞춘다([`04-redis-model.md`](./04-redis-model.md) §1).
+
+- **commerce-streamer** — 적재(쓰기) 측. Kafka Consumer → ZSET.
+- **commerce-api** — 조회(읽기) 측. ZSET → Ranking API / 상품 상세.
+
+---
+
+## 1. commerce-streamer (적재/쓰기)
+
+```mermaid
+classDiagram
+    class ProductRankingConsumer {
+        <<@Component>>
+        -RankingAggregator rankingAggregator
+        +consume(List~EventEnvelope~, Acknowledgment)
+    }
+    class RankingAggregator {
+        <<@Component>>
+        +String CONSUMER_GROUP = "ranking-aggregator"
+        -RankingRedisRepository rankingRedisRepository
+        +apply(List~EventEnvelope~)
+        -add(deltas, key, productId, score)
+    }
+    class RankingScorePolicy {
+        <<final>>
+        +double VIEW_WEIGHT = 0.1
+        +double LIKE_WEIGHT = 0.2
+        +double ORDER_WEIGHT = 0.6
+        +viewScore() double
+        +likeScore(delta) double
+        +orderScore(unitPrice, qty) double
+    }
+    class RankingRedisRepository {
+        <<@Component>>
+        -RedisTemplate~String,String~ redisTemplate
+        +incrementAll(Map~String,Map~String,Double~~)
+    }
+    class RankingKey {
+        <<final>>
+        +ZoneId ZONE = Asia/Seoul
+        +Duration TTL = 2d
+        +daily(LocalDate) String
+        +dateOf(String occurredAt) LocalDate
+    }
+    class EventEnvelope {
+        <<record>>
+        Long eventId
+        String eventType
+        String occurredAt
+        JsonNode payload
+    }
+
+    ProductRankingConsumer --> RankingAggregator
+    RankingAggregator --> RankingScorePolicy : 점수 계산
+    RankingAggregator --> RankingKey : 일자/키
+    RankingAggregator --> RankingRedisRepository : incrementAll
+    RankingRedisRepository --> RankingKey : TTL
+    ProductRankingConsumer ..> EventEnvelope
+```
+
+> `EventEnvelope`는 week7 `metrics` 패키지의 것을 재사용한다(동일 계약). `ProductRankingConsumer`는 `metrics-aggregator`와 **다른 그룹**으로 같은 토픽을 독립 소비한다.
+
+---
+
+## 2. commerce-api (조회/읽기) — 레이어드
+
+```mermaid
+classDiagram
+    class RankingV1Controller {
+        <<@RestController>>
+        -RankingFacade rankingFacade
+        +getRankings(date, page, size) ApiResponse
+    }
+    class RankingV1Dto {
+        <<static>>
+        RankingPageResponse
+        RankedItem
+    }
+    class RankingFacade {
+        <<@Component>>
+        -RankingRepository rankingRepository
+        -ProductService productService
+        -ProductMetricsService productMetricsService
+        -BrandService brandService
+        +getRanking(date, page, size) RankingPageInfo
+    }
+    class RankingPageInfo {
+        <<record>>
+        List~RankedProductInfo~ items
+        long totalCount
+        int page
+        int size
+    }
+    class RankedProductInfo {
+        <<record>>
+        long rank
+        Long productId
+        String name
+        Long price
+        Long brandId
+        String brandName
+        Long likesCount
+        double score
+    }
+    class RankingRepository {
+        <<interface / domain port>>
+        +findPage(date, page, size) List~RankedProduct~
+        +size(date) long
+        +findRank(date, productId) Optional~Long~
+    }
+    class RankedProduct {
+        <<record>>
+        long rank
+        Long productId
+        double score
+    }
+    class RankingRedisRepository {
+        <<@Repository>>
+        -RedisTemplate~String,String~ redisTemplate
+        +findPage(...) : ZREVRANGE
+        +size(...) : ZCARD
+        +findRank(...) : ZREVRANK
+    }
+    class RankingKey {
+        <<final>>
+        +ZoneId ZONE = Asia/Seoul
+        +daily(LocalDate) String
+        +today() LocalDate
+    }
+
+    RankingV1Controller --> RankingFacade
+    RankingV1Controller --> RankingV1Dto
+    RankingFacade --> RankingRepository
+    RankingFacade --> RankingPageInfo
+    RankingPageInfo --> RankedProductInfo
+    RankingRepository <|.. RankingRedisRepository : implements
+    RankingRedisRepository --> RankingKey
+    RankingRedisRepository ..> RankedProduct
+```
+
+**레이어드 규칙 준수**
+
+- `domain.ranking.RankingRepository`는 **포트(인터페이스)**, `infrastructure.ranking.RankingRedisRepository`가 Redis로 구현한다 — 도메인은 저장 기술(Redis)을 모른다.
+- `Controller → Facade → Repository(port)` 단방향. Facade가 랭킹(순위·스코어)과 상품 요약을 조립·변환한다.
+- API DTO(`RankingV1Dto`)와 응용 DTO(`RankingPageInfo`/`RankedProductInfo`)는 분리.
+
+---
+
+## 3. 상품 상세 rank 통합 (변경분)
+
+```mermaid
+classDiagram
+    class ProductFacade {
+        <<@Component>>
+        -RankingRepository rankingRepository
+        +getProductDetail(id, userId) ProductDetailInfo
+    }
+    class CachedProductDetail {
+        <<record>>
+        +toInfo(boolean liked, Long rank) ProductDetailInfo
+    }
+    class ProductDetailInfo {
+        <<record>>
+        ...기존 필드...
+        boolean liked
+        Long rank
+    }
+    ProductFacade --> RankingRepository : findRank(today, id)
+    ProductFacade --> CachedProductDetail : toInfo(liked, rank)
+    CachedProductDetail --> ProductDetailInfo
+```
+
+> `ProductDetailInfo`/`CachedProductDetail.toInfo`/`ProductV1Dto.ProductDetailResponse`에 `rank` 필드를 추가했다. `rank`는 캐시에 담지 않고 Facade가 매 조회 실시간 조합한다.
