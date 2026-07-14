@@ -4,6 +4,7 @@ package com.loopers.application.product;
  * 상품 상세 — Product + Brand 조합 결과 (Aggregate 간 ID 참조를 Facade에서 조립).
  * 재고는 수치를 노출하지 않고 있음/없음만 제공한다(UC-04 정책). 좋아요 수(likesCount)는 read model
  * (product_metrics)에서 조합된 값이다. liked는 식별된 User의 좋아요 여부.
+ * rank는 오늘(KST) 실시간 랭킹 순위(1-based, 랭킹에 없으면 null) — 매 조회 실시간 값이라 캐시 밖에서 덧붙인다.
  * 인스턴스는 캐시 표현(CachedProductDetail)의 toInfo 에서 조립한다.
  */
 public record ProductDetailInfo(
@@ -16,6 +17,7 @@ public record ProductDetailInfo(
     Long likesCount,
     Long brandId,
     String brandName,
-    boolean liked
+    boolean liked,
+    Long rank
 ) {
 }

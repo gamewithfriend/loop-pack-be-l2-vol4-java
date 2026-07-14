@@ -6,11 +6,14 @@ import com.loopers.domain.product.ProductMetricsService;
 import com.loopers.domain.product.ProductModel;
 import com.loopers.domain.product.ProductService;
 import com.loopers.domain.product.ProductSortType;
+import com.loopers.domain.ranking.RankingRepository;
 import com.loopers.domain.stock.StockService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Set;
 
@@ -24,6 +27,10 @@ public class ProductFacade {
     private final StockService stockService;
     private final ProductReadCache productReadCache;
     private final ProductViewRecorder productViewRecorder;
+    private final RankingRepository rankingRepository;
+
+    /** 실시간 랭킹 일간 버킷 기준 시간대(KST). 상세의 "오늘" 순위 판단에 쓴다. */
+    private static final ZoneId KST = ZoneId.of("Asia/Seoul");
 
     /**
      * 상품 등록 — 활성 brand 검증 + 상품 생성 + 재고 초기화를 한 트랜잭션으로 묶는다(교차-Aggregate 원자 처리).
@@ -52,7 +59,9 @@ public class ProductFacade {
         CachedProductDetail base = productReadCache.getDetail(id); // 활성 상품만 통과(없으면 NOT_FOUND)
         productViewRecorder.record(id); // 조회수 집계 트리거(outbox → catalog-events PRODUCT_VIEWED)
         boolean liked = userId != null && likeService.isLiked(userId, id);
-        return base.toInfo(liked);
+        // 오늘 실시간 랭킹 순위(없으면 null) — 캐시 밖에서 실시간 조합
+        Long rank = rankingRepository.findRank(LocalDate.now(KST), id).orElse(null);
+        return base.toInfo(liked, rank);
     }
 
     /**
