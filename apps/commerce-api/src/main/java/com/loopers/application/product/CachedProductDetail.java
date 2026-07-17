@@ -40,7 +40,8 @@ public record CachedProductDetail(
     // public ProductDetailInfo toInfo(boolean liked) {
     //     return new ProductDetailInfo(id, name, description, imageUrl, price, inStock, likesCount, brandId, brandName, liked);
     // }
-    public ProductDetailInfo toInfo(boolean liked, Long rank) {
-        return new ProductDetailInfo(id, name, description, imageUrl, price, inStock, likesCount, brandId, brandName, liked, rank);
+    // week9 최초: toInfo(boolean liked, Long rank) — 오늘 순위만 덧붙였다. rankYesterday 는 추세 노출로 추가.
+    public ProductDetailInfo toInfo(boolean liked, Long rank, Long rankYesterday) {
+        return new ProductDetailInfo(id, name, description, imageUrl, price, inStock, likesCount, brandId, brandName, liked, rank, rankYesterday);
     }
 }

@@ -62,4 +62,33 @@ class RankingScorePolicyTest {
             assertThat(RankingScorePolicy.orderScore(1_000, 0)).isEqualTo(0.0);
         }
     }
+
+    @Nested
+    @DisplayName("신호 간 상대 크기 — 가중치가 의도한 순서를 만든다.")
+    class SignalOrdering {
+
+        @DisplayName("주문 1건(10,000원)이 좋아요 3건보다 높은 점수를 얻는다.")
+        @Test
+        void 주문1건이_좋아요3건보다_높다() {
+            double order = RankingScorePolicy.orderScore(10_000, 1);  // 0.6 × log10(10001) ≈ 2.4
+            double likes = RankingScorePolicy.likeScore(3);           // 0.2 × 3 = 0.6
+
+            assertThat(order).isGreaterThan(likes);
+        }
+
+        @DisplayName("주문 1건(10,000원)이 조회 20건보다 높은 점수를 얻는다.")
+        @Test
+        void 주문1건이_조회20건보다_높다() {
+            double order = RankingScorePolicy.orderScore(10_000, 1);          // ≈ 2.4
+            double views = RankingScorePolicy.viewScore() * 20;               // 0.1 × 20 = 2.0
+
+            assertThat(order).isGreaterThan(views);
+        }
+
+        @DisplayName("좋아요 1건이 조회 1건보다 높은 점수를 얻는다.")
+        @Test
+        void 좋아요1건이_조회1건보다_높다() {
+            assertThat(RankingScorePolicy.likeScore(1)).isGreaterThan(RankingScorePolicy.viewScore());
+        }
+    }
 }

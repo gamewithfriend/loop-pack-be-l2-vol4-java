@@ -59,9 +59,13 @@ public class ProductFacade {
         CachedProductDetail base = productReadCache.getDetail(id); // 활성 상품만 통과(없으면 NOT_FOUND)
         productViewRecorder.record(id); // 조회수 집계 트리거(outbox → catalog-events PRODUCT_VIEWED)
         boolean liked = userId != null && likeService.isLiked(userId, id);
-        // 오늘 실시간 랭킹 순위(없으면 null) — 캐시 밖에서 실시간 조합
-        Long rank = rankingRepository.findRank(LocalDate.now(KST), id).orElse(null);
-        return base.toInfo(liked, rank);
+        // 오늘·어제 랭킹 순위(각각 없으면 null) — 캐시 밖에서 실시간 조합. 둘을 함께 줘 클라이언트가 추세를 판별한다
+        // (상승/하락/신규진입/이탈은 두 순위의 조합으로만 나오고, 한쪽이 null 인 경우가 의미를 갖는다).
+        // 어제 키는 TTL 2일 안이라 항상 유효하다. ZREVRANK 2회 — 상세 1건이라 파이프라이닝 없이 그대로 둔다.
+        LocalDate today = LocalDate.now(KST);
+        Long rank = rankingRepository.findRank(today, id).orElse(null);
+        Long rankYesterday = rankingRepository.findRank(today.minusDays(1), id).orElse(null);
+        return base.toInfo(liked, rank, rankYesterday);
     }
 
     /**
