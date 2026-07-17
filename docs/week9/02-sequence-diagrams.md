@@ -11,20 +11,30 @@
 
 ## 1. 적재 — Kafka Consumer → ZSET
 
-`ProductRankingConsumer`(그룹 `ranking-aggregator`)가 `catalog-events` + `order-events`를 **배치**로 받아, `RankingAggregator`가 배치 내 델타를 상품별로 합산한 뒤 `RankingRedisRepository`가 파이프라인 `ZINCRBY`로 반영한다.
+`ProductRankingConsumer`(그룹 `ranking-aggregator`)가 `catalog-events` + `order-events`를 **배치**로 받아, `RankingAggregator`가 중복 이벤트를 걸러낸 뒤 배치 내 델타를 상품별로 합산하고, `RankingRedisRepository`가 파이프라인 `ZINCRBY`로 반영한다.
 
 ```mermaid
 sequenceDiagram
     participant K as Kafka<br/>(catalog/order-events)
     participant C as ProductRankingConsumer<br/>(group=ranking-aggregator)
     participant A as RankingAggregator
+    participant H as EventHandledRepository<br/>(event_handled)
     participant P as RankingScorePolicy
     participant R as RankingRedisRepository
     participant Z as Redis ZSET<br/>ranking:all:{yyyyMMdd}
 
     K->>C: poll batch (List<EventEnvelope>)
     C->>A: apply(envelopes)
-    loop 각 이벤트
+
+    rect rgb(245, 245, 220)
+        note over A,H: 멱등 (TX 시작)
+        A->>A: 배치 내 중복 eventId 제거 (1차 방어)
+        A->>H: findHandled("ranking-aggregator", eventIds)
+        H-->>A: 이미 처리된 eventId 집합
+        A->>A: freshIds = eventIds - handled (2차 방어)
+    end
+
+    loop fresh 이벤트만
         A->>A: date = RankingKey.dateOf(occurredAt)  (KST)
         A->>A: key  = ranking:all:{yyyyMMdd}
         alt PRODUCT_VIEWED
@@ -36,9 +46,12 @@ sequenceDiagram
         end
         A->>A: deltas[key][productId] += score  (배치 내 합산)
     end
+
     A->>R: incrementAll(deltas)
     R->>Z: PIPELINE { ZINCRBY key score member ; EXPIRE key 2d }
     R-->>A: ok
+    A->>H: markHandled("ranking-aggregator", freshIds)
+    note over A,H: TX 커밋 — Redis 반영 후 마킹
     A-->>C: void
     C->>K: ack (수동 커밋, at-least-once)
 ```
@@ -47,7 +60,9 @@ sequenceDiagram
 
 - **배치 coalescing**: 같은 `(일간 키, productId)`의 점수를 메모리에서 합산해 상품당 `ZINCRBY` 1회로 줄인다(hot key 완화). 가산은 교환법칙이라 순서 무관.
 - **일자 = 이벤트 발생시각(KST)**: 컨슘 지연이 있어도 이벤트가 발생한 날짜 버킷에 반영된다.
-- **수동 커밋**: ZSET 반영 후 ack(at-least-once). 재전달 시 소폭 이중 가산은 근사값으로 수용(P-1).
+- **멱등 2단 방어**: 하이브리드 Outbox가 같은 이벤트를 두 번 발행할 수 있다(E2E 실측). 같은 배치에 실려오면 1차(배치 내 dedup), 다른 배치로 오면 2차(`event_handled`)가 막는다 — P-1.
+- **Redis 반영 → 마킹 순서**: Redis와 DB는 한 트랜잭션이 아니다. 이 순서면 최악의 경우 그 배치만 이중 가산(TTL이 지움)이고, 반대 순서면 **유실**(되찾을 수 없음)이다.
+- **수동 커밋**: ZSET 반영 후 ack(at-least-once).
 
 ---
 

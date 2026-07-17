@@ -20,8 +20,14 @@ classDiagram
         <<@Component>>
         +String CONSUMER_GROUP = "ranking-aggregator"
         -RankingRedisRepository rankingRedisRepository
-        +apply(List~EventEnvelope~)
+        -EventHandledRepository eventHandledRepository
+        +apply(List~EventEnvelope~) @Transactional
         -add(deltas, key, productId, score)
+    }
+    class EventHandledRepository {
+        <<@Component>>
+        +findHandled(group, eventIds) Set~Long~
+        +markHandled(group, eventIds)
     }
     class RankingScorePolicy {
         <<final>>
@@ -56,11 +62,12 @@ classDiagram
     RankingAggregator --> RankingScorePolicy : 점수 계산
     RankingAggregator --> RankingKey : 일자/키
     RankingAggregator --> RankingRedisRepository : incrementAll
+    RankingAggregator --> EventHandledRepository : 멱등(find/mark)
     RankingRedisRepository --> RankingKey : TTL
     ProductRankingConsumer ..> EventEnvelope
 ```
 
-> `EventEnvelope`는 week7 `metrics` 패키지의 것을 재사용한다(동일 계약). `ProductRankingConsumer`는 `metrics-aggregator`와 **다른 그룹**으로 같은 토픽을 독립 소비한다.
+> `EventEnvelope`와 `EventHandledRepository` 모두 week7 `metrics` 패키지의 것을 재사용한다. `EventHandledRepository`는 `consumer_group`을 파라미터로 받도록 설계돼 있어 `ranking-aggregator` 그룹으로 그대로 쓸 수 있다(§2.1). `ProductRankingConsumer`는 `metrics-aggregator`와 **다른 그룹**으로 같은 토픽을 독립 소비하며, `event_handled`도 그룹별 행이라 서로 경합하지 않는다.
 
 ---
 

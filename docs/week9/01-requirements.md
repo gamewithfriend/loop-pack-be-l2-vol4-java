@@ -86,7 +86,7 @@ week9의 목표는 **시간 감쇠(일간 버킷) + 가중 신호(조회·좋아
 
 ## 6. 정책 결정 & Open Questions
 
-- **P-1 멱등성** — `ZINCRBY`는 멱등이 아니라 컨슈머 재전달 시 소폭 이중 가산 가능. 실시간 랭킹은 근사 허용 + 2일 TTL 리셋으로 이를 수용하고, DB 트랜잭션과의 정확-1회 결합은 하지 않는다. (정확성이 필요하면 `event_handled`를 `ranking-aggregator` 그룹으로 재사용해 확장 — [`05-implementation-notes.md`](./05-implementation-notes.md) §2.)
+- **P-1 멱등성** — `ZINCRBY`는 그 자체로 멱등이 아니므로, `event_handled`를 `ranking-aggregator` 그룹으로 재사용해 그룹별 1회 처리를 보장한다(`metrics-aggregator`와 동일 패턴). 중복은 예외적 상황이 아니다 — 하이브리드 Outbox(즉시 발행 + 릴레이 폴링)의 경합으로 같은 이벤트가 두 번 발행되며, E2E에서 13건 중 1건으로 관측됐다. Redis와 DB를 한 트랜잭션으로 묶을 수는 없어 "Redis 반영 → 같은 트랜잭션에서 마킹" 순서를 택했고, 마킹 커밋 전 장애 시 그 배치만 이중 가산되는 잔여 창이 남는다(유실 없음). 이 잔여 오차는 근사 허용 + 2일 TTL 리셋으로 수용한다 — 상세는 [`05-implementation-notes.md`](./05-implementation-notes.md) §2.1.
 - **P-2 삭제/비활성 상품** — ZSET엔 남을 수 있으나, API 조립 시 활성 상품만 조회되어 랭킹에서 제외된다(노출 필터).
 - **OQ-1 (Nice-to-Have)** 시간 단위 랭킹의 윈도우 병합(최근 N시간 합산) 전략.
 - **OQ-2 (Nice-to-Have)** 콜드 스타트 — 부팅 시 `product_metrics` 스냅샷으로 ZSET 워밍업 여부.
