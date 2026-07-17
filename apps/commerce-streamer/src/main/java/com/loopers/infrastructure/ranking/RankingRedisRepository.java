@@ -17,8 +17,9 @@ import java.util.Map;
  * <p><b>TTL</b>: 매 배치마다 {@code expire(key, 2d)} 로 갱신한다 — 일간 키라 그 날 마지막 쓰기 기준 2일 뒤 만료되어
  * "오늘/어제" 랭킹 조회가 항상 유효하다.
  *
- * <p><b>정합성</b>: {@code ZINCRBY} 는 멱등이 아니므로 컨슈머 재전달 시 소폭 이중 가산될 수 있다. 실시간 랭킹은
- * 근사값이 허용되고 2일 TTL 로 매일 리셋되므로 DB 트랜잭션과의 결합(정확 1회) 대신 단순성을 택했다.
+ * <p><b>정합성</b>: {@code ZINCRBY} 는 그 자체로 멱등이 아니므로, 같은 이벤트를 두 번 반영하지 않는 책임은
+ * 호출자({@link com.loopers.application.ranking.RankingAggregator})의 event_handled 필터에 있다. 이 어댑터는
+ * 넘겨받은 델타를 그대로 가산할 뿐이다 — 중복 제거된 fresh 이벤트만 넘어온다고 가정한다.
  */
 @Component
 @RequiredArgsConstructor
