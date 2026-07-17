@@ -102,7 +102,7 @@ sequenceDiagram
 
 ---
 
-## 3. 조회 — 상품 상세의 실시간 순위
+## 3. 조회 — 상품 상세의 순위와 추세
 
 ```mermaid
 sequenceDiagram
@@ -111,22 +111,28 @@ sequenceDiagram
     participant F as ProductFacade
     participant Cache as ProductReadCache
     participant RR as RankingRepository
-    participant Z as Redis ZSET (오늘 키)
+    participant Z as Redis ZSET (오늘/어제 키)
 
     U->>Ct: GET /api/v1/products/{id}/detail
     Ct->>F: getProductDetail(id, userId)
     F->>Cache: getDetail(id)  (사용자 무관 캐시)
     Cache-->>F: CachedProductDetail
     F->>RR: findRank(today(KST), id)
-    RR->>Z: ZREVRANK key member
+    RR->>Z: ZREVRANK ranking:all:{오늘} member
     Z-->>RR: 0-based rank | null
     RR-->>F: Optional<Long> (1-based) | empty
-    F->>F: base.toInfo(liked, rank)   (rank는 캐시 밖에서 조합)
-    F-->>Ct: ProductDetailInfo (rank 포함, 없으면 null)
+    F->>RR: findRank(today-1, id)
+    RR->>Z: ZREVRANK ranking:all:{어제} member
+    Z-->>RR: 0-based rank | null
+    RR-->>F: Optional<Long> (1-based) | empty
+    F->>F: base.toInfo(liked, rank, rankYesterday)   (순위는 캐시 밖에서 조합)
+    F-->>Ct: ProductDetailInfo (각각 없으면 null)
     Ct-->>U: ApiResponse<ProductDetailResponse>
 ```
 
 **핵심 포인트**
 
-- `rank`는 실시간 값이라 **캐시에 담지 않는다**. 사용자 무관 상세는 캐시에서, `liked`와 `rank`만 캐시 밖에서 실시간 조합한다.
-- 오늘 랭킹에 없는 상품은 `rank = null`.
+- 순위는 **캐시에 담지 않는다**. 사용자 무관 상세는 캐시에서, `liked`·`rank`·`rankYesterday`만 캐시 밖에서 조합한다(이유는 [`05-implementation-notes.md`](./05-implementation-notes.md) §2.4).
+- **상세의 `rank`는 "오늘 뜨는가"** — 랭킹 페이지가 `date`로 과거를 보는 것과 달리 오늘 고정이다. 어제 1위여도 오늘 활동이 없으면 `rank = null`.
+- **`rankYesterday`를 함께 주는 이유는 추세**다. `rank`만으로는 "어제 1위였다가 이탈"과 "이틀간 무관"이 둘 다 null이라 구분되지 않는다. 서버는 델타로 압축하지 않고 원본 둘을 주며, 해석(상승/하락/신규진입/이탈)은 클라이언트 몫이다 — §2.5.
+- `ZREVRANK` 2회가 나가지만 상세 1건이라 파이프라이닝하지 않는다.

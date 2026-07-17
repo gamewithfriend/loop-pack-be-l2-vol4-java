@@ -142,20 +142,38 @@ classDiagram
     RankingFacade --> RankingRepository
     RankingFacade --> RankingPageInfo
     RankingPageInfo --> RankedProductInfo
-    RankingRepository <|.. RankingRedisRepository : implements
+    class RankingCompositeRepository {
+        <<@Primary @Repository>>
+        -RankingRedisRepository redis
+        -RankingSnapshotRepository snapshot
+        +findPage(date, page, size) List~RankedProduct~
+        +size(date) long
+        +findRank(date, productId) Optional~Long~
+    }
+    class RankingSnapshotRepository {
+        <<@Repository>>
+        -RankingSnapshotJpaRepository jpa
+        +findPage(date, page, size) List~RankedProduct~
+        +size(date) long
+    }
+    RankingRepository <|.. RankingCompositeRepository : implements (유일)
+    RankingCompositeRepository --> RankingRedisRepository : 오늘·어제(ZSET)
+    RankingCompositeRepository --> RankingSnapshotRepository : 그 이전(DB)
     RankingRedisRepository --> RankingKey
     RankingRedisRepository ..> RankedProduct
+    RankingSnapshotRepository ..> RankedProduct
 ```
 
 **레이어드 규칙 준수**
 
-- `domain.ranking.RankingRepository`는 **포트(인터페이스)**, `infrastructure.ranking.RankingRedisRepository`가 Redis로 구현한다 — 도메인은 저장 기술(Redis)을 모른다.
+- `domain.ranking.RankingRepository`는 **포트(인터페이스)**, `infrastructure.ranking.RankingCompositeRepository`가 유일한 구현이다 — 도메인은 저장 기술(Redis/DB)도, 데이터가 **어느 소스에서 왔는지도** 모른다. Redis/스냅샷 선택은 인프라 관심사라 포트 뒤에 숨는다.
+- `RankingRedisRepository`·`RankingSnapshotRepository`는 포트를 직접 구현하지 않는다 — 컴포지트 뒤의 한쪽 소스일 뿐이다. 소스 선택 규칙(날짜 단위, 혼합 금지)은 [`05-implementation-notes.md`](./05-implementation-notes.md) §2.6.
 - `Controller → Facade → Repository(port)` 단방향. Facade가 랭킹(순위·스코어)과 상품 요약을 조립·변환한다.
 - API DTO(`RankingV1Dto`)와 응용 DTO(`RankingPageInfo`/`RankedProductInfo`)는 분리.
 
 ---
 
-## 3. 상품 상세 rank 통합 (변경분)
+## 3. 상품 상세 순위·추세 통합 (변경분)
 
 ```mermaid
 classDiagram
@@ -166,17 +184,19 @@ classDiagram
     }
     class CachedProductDetail {
         <<record>>
-        +toInfo(boolean liked, Long rank) ProductDetailInfo
+        +toInfo(boolean liked, Long rank, Long rankYesterday) ProductDetailInfo
     }
     class ProductDetailInfo {
         <<record>>
         ...기존 필드...
         boolean liked
         Long rank
+        Long rankYesterday
     }
     ProductFacade --> RankingRepository : findRank(today, id)
-    ProductFacade --> CachedProductDetail : toInfo(liked, rank)
+    ProductFacade --> RankingRepository : findRank(today-1, id)
+    ProductFacade --> CachedProductDetail : toInfo(liked, rank, rankYesterday)
     CachedProductDetail --> ProductDetailInfo
 ```
 
-> `ProductDetailInfo`/`CachedProductDetail.toInfo`/`ProductV1Dto.ProductDetailResponse`에 `rank` 필드를 추가했다. `rank`는 캐시에 담지 않고 Facade가 매 조회 실시간 조합한다.
+> `ProductDetailInfo`/`CachedProductDetail.toInfo`/`ProductV1Dto.ProductDetailResponse`에 `rank`·`rankYesterday` 필드를 추가했다. 둘 다 캐시에 담지 않고 Facade가 매 조회 조합한다(§2.4). 두 순위의 조합으로 상승·하락·신규진입·이탈이 판별된다(§2.5).

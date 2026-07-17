@@ -102,3 +102,58 @@ EXEC
 
 - **하위 호환**: `product_metrics` 집계 컨슈머는 payload를 `JsonNode`로 읽어 `productId`/`quantity`만 사용하므로 `unitPrice` 추가에 무영향. 구(舊) 이벤트에 `unitPrice`가 없으면 랭킹은 0으로 처리(가산 없음).
 - 원본 `OrderPaidEvent.Item(productId, quantity)` 계약은 주석으로 보존.
+
+---
+
+## 5. TTL 밖 과거 랭킹 — 영속 스냅샷
+
+§1.1의 TTL 2일은 **저장 비용 상한을 위한 의도된 결정**이다(NFR-4). 그 대가로 3일 전 랭킹은 조회할 수 없다. 이를 보존하기 위해 확정된 하루치 상위 N을 DB로 내린다.
+
+> **먼저 짚을 것**: 단순히 "과거를 더 오래 보고 싶다"가 목적이라면 **TTL 연장(`Duration.ofDays(N)` 한 줄)이 압도적으로 싸다.** ZSET은 그날 활동이 있었던 상품만 담으므로(전체 상품이 아니라) 30일 보관해도 수십 MB 수준이다. 스냅샷은 배치·테이블·이중 읽기 경로를 추가하는 대가를 치른다. 그 대가는 **ZSET이 줄 수 없는 것**으로 정당화된다 — SQL 조인·집계(분석 쿼리), 수개월 이상 장기 보관, Redis 유실 시 복구 재료.
+
+### 5.1 테이블
+
+| 컬럼 | 타입 | 비고 |
+| --- | --- | --- |
+| `ranking_date` | DATE | PK ①. 스냅샷 대상 일자(KST) |
+| `product_id` | BIGINT | PK ②. 같은 날짜 중복 적재 방지 |
+| `rank_no` | INT | 적재 시점에 확정된 1-based 순위. `rank`는 MySQL 8 예약어(RANK() 윈도우 함수) |
+| `score` | DOUBLE | ZSET score 그대로 |
+| `created_at` | DATETIME(6) | 적재 시각 |
+
+- **인덱스** `idx_rds_date_rank (ranking_date, rank_no)` — PK가 `(ranking_date, product_id)`라 순위 정렬을 타지 못한다. 커버링은 노리지 않는다(페이지당 최대 size행이라 lookup 비용이 무의미).
+- **소유**: 쓰기 `commerce-batch`(JdbcTemplate) / 스키마·읽기 `commerce-api`(`RankingSnapshotEntity`). `product_metrics`를 streamer가 쓰는 앱 경계 패턴과 동일.
+- DDL: local/test는 ddl-auto:create + `import.sql`(인덱스), 운영은 [`migration_ranking_snapshot.sql`](./migration_ranking_snapshot.sql).
+
+### 5.2 적재 (commerce-batch `rankingSnapshotJob`)
+
+```
+ZREVRANGE ranking:all:{어제} 0 (N-1) WITHSCORES   -- 상위 N만
+  ↓
+DELETE FROM ranking_daily_snapshot WHERE ranking_date = {어제}
+INSERT INTO ranking_daily_snapshot ... (batch)
+```
+
+- **대상은 어제** — 오늘 랭킹은 아직 계속 변한다. 확정된 날짜만 찍는다. 어제 키는 TTL(2일) 안이라 자정 직후에도 살아있다.
+- **상위 N만**(`ranking.snapshot.top-n`, 기본 100). 과거 500위를 되짚는 수요는 없다고 보고 전량 적재를 포기했다 → **과거 날짜의 `totalCount`는 실제 그날 랭킹 크기가 아니라 보존된 행 수**(최대 N)다.
+- **멱등**: delete-then-insert. 같은 날짜로 몇 번을 돌려도 같은 상태로 수렴한다(배치 재시도·수동 재실행 안전).
+
+### 5.3 조회 — 날짜로 소스를 고른다
+
+`RankingCompositeRepository`(포트의 유일한 구현)가 분기한다. 응용 계층은 출처를 모른다.
+
+| 날짜 | 소스 |
+| --- | --- |
+| ZSET에 존재(오늘·어제) | Redis — 실시간 |
+| ZSET에 없음(TTL 만료) | 스냅샷 DB |
+
+> **페이지 단위로 폴백하면 버그다.** "Redis 결과가 비면 스냅샷"으로 짜면, 그 날짜가 ZSET에 살아있는데 범위 밖 페이지를 요청했을 때(3건뿐인데 `page=10`) 빈 결과를 보고 스냅샷으로 넘어가 **같은 날짜인데 두 소스가 섞인다.** 그래서 `ZCARD > 0`으로 날짜의 소스를 확정한다.
+>
+> 다만 ZCARD를 **먼저** 던지면 정상 경로(Redis 히트)의 왕복이 하나 늘므로, `ZREVRANGE`를 먼저 하고 **결과가 비었을 때만** ZCARD로 "날짜가 없는 것"과 "페이지가 범위 밖인 것"을 가른다 → 정상 경로 비용은 기존과 동일하다.
+
+`findRank`(상품 상세)는 **폴백하지 않는다.** 상세는 오늘/어제만 조회하고 그 두 날짜는 항상 TTL 안이다. 폴백을 넣으면 랭킹에 없는 상품을 조회할 때마다 헛된 DB 조회가 2회씩 hot path에 생긴다.
+
+### 5.4 한계
+
+- **스냅샷 테이블은 TTL이 없어 자동으로 줄지 않는다.** ZSET의 TTL이 하던 회수 역할을 대신할 주체가 없다. 상위 100 × 365일 ≈ 36,500행/년이라 당장은 문제없지만, 무한 증가는 정책이 아니다 — 보관 기간을 정해 주기 삭제를 붙여야 한다(migration SQL에 쿼리만 적어둠).
+- **배치가 안 돌면 그날 랭킹은 TTL과 함께 영영 사라진다.** 배치 실패가 **조용한 데이터 유실**이 된다. 스케줄러 + 실패 알림이 필요하다(현재 수동 실행).
